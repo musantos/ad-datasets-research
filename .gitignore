@@ -18,3 +18,4 @@ experiments/checkpoints/
 # Ambiente/sistema
 .env
 *.log
+.ipynb_checkpoints/
