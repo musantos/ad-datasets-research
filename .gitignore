@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Dados (brutos, cache, predicoes) -- nada aqui deve ser versionado,
+# independente do dataset (Waymo, ZOD, A2D2, etc.)
+datasets/*
+
+# Checkpoints de modelo
+experiments/checkpoints/
+*.pth
+
+# Videos/imagens geradas
+*.mp4
+*.png
+
+# Ambiente/sistema
+.env
+*.log
