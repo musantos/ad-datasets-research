@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 import time
 
 from src.core.waymo_pytorch_dataset import WaymoMotionDataset
@@ -42,8 +42,23 @@ def masked_mse_per_example(outputs, targets, mask):
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    cache_dir = "/workspace/datasets/waymo/cache"
-    checkpoint_dir = "/workspace/experiments/checkpoints"
+    # SPLIT OFICIAL DO WAYMO -- nao ha mais random_split.
+    # Treino e validacao vem de splits DIFERENTES do dataset (pastas
+    # scenario/training e scenario/validation), entao nao existe
+    # possibilidade de vazamento: sao cenarios distintos. Isso tambem
+    # torna as metricas comparaveis com a literatura, que reporta sobre
+    # o split 'validation' (o 'testing' nao tem futuro anotado).
+    #
+    # Sao exatamente os mesmos caches usados pelo train_multimodal.py --
+    # e o que garante que a comparacao entre os dois modelos isole a
+    # multimodalidade como unica variavel.
+    train_cache = "/workspace/datasets/waymo/cache_train"
+    val_cache = "/workspace/datasets/waymo/cache_val"
+
+    # Diretorio novo: preserva os checkpoints antigos (split caseiro,
+    # com contaminacao) em checkpoints/baseline_3shards/ para efeito de
+    # historico, sem misturar com os resultados validos.
+    checkpoint_dir = "/workspace/experiments/checkpoints/baseline_oficial"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     print("=" * 50)
@@ -51,25 +66,26 @@ def train():
     print("=" * 50)
 
     try:
-        full_dataset = WaymoMotionDataset(cache_dir)
-        if len(full_dataset) == 0:
-            print(f"[ERRO] Nenhum arquivo .npy encontrado em {cache_dir}.")
-            return
+        train_dataset = WaymoMotionDataset(train_cache)
+        val_dataset = WaymoMotionDataset(val_cache)
     except Exception as e:
         print(f"[ERRO] Falha ao carregar dataset: {e}")
         return
 
-    val_fraction = 0.2
-    val_size = max(1, int(len(full_dataset) * val_fraction))
-    train_size = len(full_dataset) - val_size
+    if len(train_dataset) == 0:
+        print(f"[ERRO] Cache de treino vazio: {train_cache}")
+        print("       Se voce ainda nao renomeou o cache antigo:")
+        print("       mv datasets/waymo/cache datasets/waymo/cache_train")
+        return
 
-    generator = torch.Generator().manual_seed(42)
-    train_dataset, val_dataset = random_split(
-        full_dataset, [train_size, val_size], generator=generator
-    )
+    if len(val_dataset) == 0:
+        print(f"[ERRO] Cache de validacao vazio: {val_cache}")
+        print("       Rode antes, no container de METRICAS:")
+        print("       python3 -m src.core.waymo_preprocessor --split validation --shards 0,1,2")
+        return
 
-    print(f"[OK] Dataset total: {len(full_dataset)} exemplos "
-          f"-> treino: {train_size} | validacao: {val_size}")
+    print(f"[OK] Treino (split oficial 'training'):      {len(train_dataset)} exemplos")
+    print(f"[OK] Validacao (split oficial 'validation'): {len(val_dataset)} exemplos")
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4)
@@ -155,6 +171,7 @@ def train():
 
     print("\n[SUCESSO] Treinamento finalizado.")
     print(f"Melhor checkpoint: motion_model_best.pth (Val Loss: {best_val_loss:.4f})")
+    print(f"Salvo em: {checkpoint_dir}")
 
 
 if __name__ == "__main__":
