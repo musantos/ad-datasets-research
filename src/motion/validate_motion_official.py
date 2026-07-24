@@ -1,4 +1,5 @@
 import os
+import argparse
 import numpy as np
 import tensorflow as tf
 from google.protobuf import text_format
@@ -8,17 +9,18 @@ from waymo_open_dataset.metrics.python import config_util_py as config_util
 from waymo_open_dataset.protos import motion_metrics_pb2
 
 # RODAR ESTE SCRIPT NO CONTAINER DE METRICAS (CPU) -- e onde o
-# py_metrics_ops (TF/WOD) existe. Requer que run_inference.py ja tenha
+# py_metrics_ops (TF/WOD) existe. Requer que run_inference*.py ja tenha
 # rodado no container de treino e que a pasta de predicoes esteja
 # acessivel aqui (mesmo volume compartilhado do cache).
 
-CACHE_DIR = "/workspace/datasets/waymo/cache"
-PRED_DIR = "/workspace/datasets/waymo/predictions"
+# Avaliacao SEMPRE sobre o split oficial de validacao.
+CACHE_DIR = "/workspace/datasets/waymo/cache_val"
+DEFAULT_PRED_DIR = "/workspace/datasets/waymo/predictions/baseline"
 
 # Teto de agentes-alvo por cenario. O tutorial oficial usa 128 (todos os
 # agentes possiveis por cenario, com mascara). Aqui simplificamos: como
 # ja filtramos para os agentes-alvo (is_target), o maior numero observado
-# nos seus logs foi 8 -- deixamos margem de seguranca.
+# nos logs foi 8 -- deixamos margem de seguranca.
 # Isso e matematicamente equivalente ao approach oficial, pois os slots
 # de padding tem gt_is_valid=False e pred_mask=False, entao nao
 # contribuem para a metrica -- so nao e byte-a-byte identico ao codigo
@@ -29,6 +31,12 @@ MAX_AGENTS = 12
 TRACK_STEPS_PER_SECOND = 10
 PREDICTION_STEPS_PER_SECOND = 2
 TG = 91  # track_history_samples(10) + 1 + track_future_samples(80)
+
+# Numero de passos da predicao apos o downsample para 2Hz.
+PRED_STEPS = 16
+
+# Teto de modos suportado. Casa com max_predictions da config oficial.
+MAX_MODES = 6
 
 
 def build_config():
@@ -64,7 +72,38 @@ def build_config():
     return config
 
 
-def build_scenario_tensors(cache_path, pred_path):
+def unpack_prediction(entry):
+    """
+    Normaliza a predicao de um agente para (trajetorias [K,80,2], scores [K]).
+
+    Aceita os dois formatos gravados pelos scripts de inferencia:
+
+      - UNIMODAL   (run_inference.py):
+            np.ndarray [80, 2]
+        -> vira K=1 com score 1.0, que reproduz exatamente o
+           comportamento anterior deste script.
+
+      - MULTIMODAL (run_inference_multimodal.py):
+            {'trajectories': [K, 80, 2], 'scores': [K]}
+
+    A deteccao e por tipo, nao por flag: assim o mesmo script avalia os
+    dois tipos de modelo sem parametro extra e sem risco de o usuario
+    escolher o modo errado.
+    """
+    if isinstance(entry, dict):
+        traj = np.asarray(entry['trajectories'], dtype=np.float32)  # [K, 80, 2]
+        scores = np.asarray(entry['scores'], dtype=np.float32)      # [K]
+        if traj.ndim != 3:
+            raise ValueError(f"trajetorias multimodais com ndim={traj.ndim}, esperado 3")
+        return traj, scores
+
+    traj = np.asarray(entry, dtype=np.float32)                      # [80, 2]
+    if traj.ndim != 2:
+        raise ValueError(f"trajetoria unimodal com ndim={traj.ndim}, esperado 2")
+    return traj[None, ...], np.ones((1,), dtype=np.float32)
+
+
+def build_scenario_tensors(cache_path, pred_path, n_modes):
     data = np.load(cache_path, allow_pickle=True).item()
     preds = np.load(pred_path, allow_pickle=True).item()
 
@@ -83,23 +122,36 @@ def build_scenario_tensors(cache_path, pred_path):
     gt_valid = np.zeros((MAX_AGENTS, TG), dtype=bool)
     obj_type = np.zeros((MAX_AGENTS,), dtype=np.int64)
     obj_id = np.zeros((MAX_AGENTS,), dtype=np.int64)
-    pred_traj = np.zeros((MAX_AGENTS, 16, 2), dtype=np.float32)
+
+    # Agora com dimensao de modo: [MAX_AGENTS, K, 16, 2] e [MAX_AGENTS, K].
+    pred_traj = np.zeros((MAX_AGENTS, n_modes, PRED_STEPS, 2), dtype=np.float32)
+    pred_score = np.zeros((MAX_AGENTS, n_modes), dtype=np.float32)
     pred_mask = np.zeros((MAX_AGENTS,), dtype=bool)
 
     # Formula oficial de downsampling (10Hz -> 2Hz), do tutorial:
     # prediction_trajectory[..., (interval - 1)::interval, :]
     interval = TRACK_STEPS_PER_SECOND // PREDICTION_STEPS_PER_SECOND  # 5
 
+    n_used = 0
     for i, agent in enumerate(target_agents[:MAX_AGENTS]):
         gt_traj[i] = agent['full_state']       # [91, 7]
         gt_valid[i] = agent['mask']             # [91]
         obj_type[i] = int(agent['type'])
         obj_id[i] = int(agent['id'])
 
-        full_pred = preds[agent['id']]          # [80, 2] a 10Hz
-        sub_pred = full_pred[(interval - 1)::interval, :]  # [16, 2] a 2Hz
-        pred_traj[i] = sub_pred
+        full_pred, scores = unpack_prediction(preds[agent['id']])   # [K,80,2], [K]
+        k = min(full_pred.shape[0], n_modes)
+
+        sub_pred = full_pred[:k, (interval - 1)::interval, :]        # [k, 16, 2]
+        pred_traj[i, :k] = sub_pred
+        pred_score[i, :k] = scores[:k]
+
+        # Se o modelo produziu menos modos que n_modes, os slots restantes
+        # ficam com trajetoria zerada e score 0. Score 0 faz a metrica
+        # ranquea-los por ultimo; como minADE/minFDE sao best-of-K, um modo
+        # extra ruim nao piora o resultado.
         pred_mask[i] = True
+        n_used += 1
 
     return {
         'scenario_id': data['scenario_id'],
@@ -108,28 +160,62 @@ def build_scenario_tensors(cache_path, pred_path):
         'object_type': obj_type,
         'object_id': obj_id,
         'pred_trajectory': pred_traj,
+        'pred_score': pred_score,
         'pred_mask': pred_mask,
+        'n_agents': n_used,
     }
 
 
-def run_validation():
+def detect_n_modes(pred_dir, files):
+    """
+    Descobre quantos modos as predicoes tem, olhando o primeiro arquivo
+    valido. Evita ter que passar isso por parametro e errar.
+    """
+    for fname in files:
+        path = os.path.join(pred_dir, fname)
+        if not os.path.exists(path):
+            continue
+        preds = np.load(path, allow_pickle=True).item()
+        for entry in preds.values():
+            traj, _ = unpack_prediction(entry)
+            return int(traj.shape[0])
+    return 1
+
+
+def run_validation(pred_dir):
     config = build_config()
     metric_names = config_util.get_breakdown_names_from_motion_config(config)
 
+    if not os.path.isdir(pred_dir):
+        print(f"ERRO: pasta de predicoes nao encontrada: {pred_dir}")
+        return
+
     files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.npy')]
+
+    n_modes = detect_n_modes(pred_dir, files)
+    if n_modes > MAX_MODES:
+        print(f"AVISO: predicoes com {n_modes} modos, acima de max_predictions="
+              f"{MAX_MODES}. Usando os {MAX_MODES} primeiros.")
+        n_modes = MAX_MODES
+
+    kind = "UNIMODAL" if n_modes == 1 else f"MULTIMODAL (K={n_modes})"
+    print(f"INFO: cache  = {CACHE_DIR}")
+    print(f"INFO: predic = {pred_dir}")
+    print(f"INFO: formato detectado = {kind}")
 
     all_gt_traj, all_gt_valid = [], []
     all_obj_type, all_obj_id, all_scenario_id = [], [], []
     all_pred_traj, all_pred_score, all_pred_idx, all_pred_idx_mask = [], [], [], []
 
     n_scenarios = 0
+    n_trajectories = 0
     for fname in files:
         cache_path = os.path.join(CACHE_DIR, fname)
-        pred_path = os.path.join(PRED_DIR, fname)
+        pred_path = os.path.join(pred_dir, fname)
         if not os.path.exists(pred_path):
             continue
 
-        t = build_scenario_tensors(cache_path, pred_path)
+        t = build_scenario_tensors(cache_path, pred_path, n_modes)
         if t is None:
             continue
 
@@ -139,10 +225,15 @@ def run_validation():
         all_obj_id.append(t['object_id'][None])
         all_scenario_id.append(t['scenario_id'])
 
-        pred = t['pred_trajectory'][None, :, None, None, :, :]  # [1, MAX_AGENTS, 1, 1, 16, 2]
-        score = np.ones((1, MAX_AGENTS, 1), dtype=np.float32)
+        # Shape esperado pela API:
+        #   [batch, grupos, top_k, agentes_por_grupo, steps, 2]
+        # Aqui: grupos = MAX_AGENTS (1 agente por grupo), top_k = n_modes.
+        # A versao anterior deste script fixava top_k=1; e a unica mudanca
+        # estrutural necessaria para avaliar o modelo multimodal.
+        pred = t['pred_trajectory'][None, :, :, None, :, :]  # [1, MAX_AGENTS, K, 1, 16, 2]
+        score = t['pred_score'][None]                        # [1, MAX_AGENTS, K]
         idx = np.tile(np.arange(MAX_AGENTS, dtype=np.int64)[None, :, None], (1, 1, 1))
-        idx_mask = t['pred_mask'][None, :, None]        # [1, MAX_AGENTS, 1]
+        idx_mask = t['pred_mask'][None, :, None]             # [1, MAX_AGENTS, 1]
 
         all_pred_traj.append(pred)
         all_pred_score.append(score)
@@ -150,13 +241,16 @@ def run_validation():
         all_pred_idx_mask.append(idx_mask)
 
         n_scenarios += 1
+        n_trajectories += t['n_agents']
 
     if n_scenarios == 0:
-        print("ERRO: nenhum cenario com predicoes encontrado. Rode run_inference.py primeiro "
-              "(no container de treino) e confirme que PRED_DIR e visivel aqui.")
+        print("ERRO: nenhum cenario com predicoes encontrado. "
+              "Rode run_inference primeiro (no container de treino) e "
+              "confirme que a pasta de predicoes e visivel aqui.")
         return
 
-    print(f"INFO: validando {n_scenarios} cenarios com as metricas oficiais do Waymo Motion...")
+    print(f"INFO: validando {n_scenarios} cenarios / {n_trajectories} trajetorias-alvo "
+          f"com as metricas oficiais do Waymo Motion...")
 
     gt_trajectory = np.concatenate(all_gt_traj, axis=0)
     gt_is_valid = np.concatenate(all_gt_valid, axis=0)
@@ -168,6 +262,9 @@ def run_validation():
     prediction_score = np.concatenate(all_pred_score, axis=0)
     prediction_ground_truth_indices = np.concatenate(all_pred_idx, axis=0)
     prediction_ground_truth_indices_mask = np.concatenate(all_pred_idx_mask, axis=0)
+
+    print(f"INFO: shape de prediction_trajectory = {prediction_trajectory.shape}")
+    print(f"INFO: shape de prediction_score      = {prediction_score.shape}")
 
     (min_ade, min_fde, miss_rate, overlap_rate,
      mean_average_precision) = py_metrics_ops.motion_metrics(
@@ -185,6 +282,7 @@ def run_validation():
 
     print("\n" + "=" * 50)
     print("RESULTADO DA VALIDACAO OFICIAL (Waymo Motion Metrics)")
+    print(f"Predicoes: {pred_dir}  |  formato: {kind}")
     print("=" * 50)
     for i, name in enumerate(metric_names):
         print(f"\n[{name}]")
@@ -196,4 +294,11 @@ def run_validation():
 
 
 if __name__ == "__main__":
-    run_validation()
+    parser = argparse.ArgumentParser(
+        description="Calcula as metricas oficiais do Waymo Motion sobre o split de validacao"
+    )
+    parser.add_argument("--pred-dir", default=DEFAULT_PRED_DIR,
+                        help="pasta com as predicoes a avaliar")
+    args = parser.parse_args()
+
+    run_validation(pred_dir=args.pred_dir)

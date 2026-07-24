@@ -1,5 +1,5 @@
 # Projeto de Mestrado — Motion Prediction (Waymo Open Dataset)
-### Documento de contexto — Milestone 2 (split oficial + experimento multimodal)
+### Documento de contexto — Milestone 2 (split oficial + multimodal K=6 validado)
 Última atualização: 24 de julho de 2026
 
 ---
@@ -83,8 +83,8 @@ Existe também `tf_example/` (formato pré-processado por agente) e
 │   ├── cache_val/           # .npy do split 'validation' (shards 0,1,2)
 │   ├── motion -> /data/.disks/hdd3a/waymo_motion/.../uncompressed/  (symlink)
 │   └── predictions/
-│       ├── baseline/        # predições do SimpleTrajectoryPredictor
-│       └── multimodal/      # predições do MultimodalTrajectoryPredictor
+│       ├── baseline/            # predições do SimpleTrajectoryPredictor
+│       └── multimodal_cls*/     # predições do multimodal, uma por cls_weight
 ├── docker/
 │   ├── waymo-metrics/Dockerfile     # container de METRICAS (CPU)
 │   ├── training-v1/Dockerfile       # container de TREINO (GPU)
@@ -92,7 +92,7 @@ Existe também `tf_example/` (formato pré-processado por agente) e
 ├── experiments/checkpoints/
 │   ├── baseline_3shards/    # HISTÓRICO — split caseiro, ver seção 8.1
 │   ├── baseline_oficial/    # baseline com split oficial
-│   └── multimodal/          # modelo multimodal K=6
+│   └── multimodal_cls*/     # multimodal K=6, uma pasta por cls_weight
 ├── src/
 │   ├── core/
 │   │   ├── waymo_decoder.py             # decodifica Scenario proto bruto
@@ -132,13 +132,25 @@ python3 -m src.core.waymo_preprocessor --split validation --shards 0,1,2
 python3 -m src.motion.train_motion                 # baseline unimodal
 python3 -m src.motion.run_inference
 
-python3 -m src.motion.train_multimodal             # multimodal K=6
-python3 -m src.motion.run_inference_multimodal
+# multimodal: cls_weight vira parte do nome da pasta de checkpoint,
+# entao rodadas da varredura nao se sobrescrevem
+python3 -m src.motion.train_multimodal --cls-weight 20
+python3 -m src.motion.run_inference_multimodal --tag cls20
 
 # --- Container de METRICAS (CPU) ---
+# O validate detecta sozinho se as predicoes sao unimodais ou multimodais.
 python3 -m src.motion.validate_motion_official \
     --pred-dir /workspace/datasets/waymo/predictions/baseline
+
+python3 -m src.motion.validate_motion_official \
+    --pred-dir /workspace/datasets/waymo/predictions/multimodal_cls20
 ```
+
+**Checagem obrigatoria antes de confiar em qualquer numero:** o script
+imprime o shape de `prediction_trajectory` antes de chamar a metrica.
+Unimodal deve dar `(N, 12, 1, 1, 16, 2)`; multimodal K=6 deve dar
+`(N, 12, 6, 1, 16, 2)`. Se a terceira posicao nao for 6 no multimodal, o
+empacotamento dos modos falhou e o resultado nao vale nada.
 
 **Atenção:** retreinar sobrescreve os checkpoints do experimento
 correspondente. Cada experimento tem sua própria pasta em
@@ -265,19 +277,51 @@ dominante nas métricas atuais.
 
 | Grandeza | Baseline | Multimodal | Comparável? |
 |---|---|---|---|
-| Val Loss | `Val Loss` | `Val(top-1)` | **sim** — mesma definição |
-| — | — | `Val(melhor modo)` | não — best-of-6, otimista por construção |
-| minADE / minFDE / MissRate / mAP | oficial | oficial | **sim** |
+| minADE / minFDE / MissRate / mAP (oficiais) | sim | sim | **sim — é a comparação válida** |
+| Val Loss (treino) | `Val Loss` | `Val(melhor modo)` | não — best-of-6 vs best-of-1 |
+| Val Loss (treino) | `Val Loss` | `Val(top-1)` | não — ver abaixo |
 
-O número honesto para "a multimodalidade ajudou?" é o **top-1** contra o
-`Val Loss` do baseline. O `melhor modo` mede outra coisa: se as 6 hipóteses
-cobrem o futuro real — útil, mas otimista, porque usa o ground truth para
-escolher qual modo reportar.
+**Correção registrada em 24/07.** Uma versão anterior deste documento
+afirmava que `Val(top-1)` era o número honesto para comparar com o
+baseline. **Está errado**, e o motivo é conceitual:
+
+para MSE com uma única predição, o ótimo matemático é a **média
+condicional** do futuro — e é exatamente isso que o baseline unimodal
+aprende. O WTA faz o oposto de propósito: empurra cada modo para uma
+hipótese específica, longe da média. Medido: melhor modo ~47, modo
+escolhido ~230, média dos 6 ~715. Os modos são deliberadamente
+espalhados, então o top-1 de um modelo multimodal **nunca** vai bater o
+unimodal em MSE — e isso não é falha, é a consequência esperada de
+otimizar cobertura em vez de erro médio.
+
+A comparação válida é pelas métricas oficiais, que existem justamente
+para isso: minADE/minFDE/MissRate medem cobertura (best-of-6) e mAP mede
+a qualidade do ranqueamento.
+
+**Uso correto dos diagnósticos de treino:**
+- `Val(melhor modo)` — proxy de minADE, útil para seleção de checkpoint
+- `Val(top-1)` e `rank medio` — saúde da cabeça de score, não comparação
+- `Uso dos modos` — detecção de colapso
 
 **Assimetria a declarar na dissertação:** o baseline seleciona o melhor
 checkpoint pela val loss unimodal; o multimodal, pelo erro do melhor modo
-(proxy direto de minADE, que é best-of-6). Cada um otimiza o que sua métrica
-premia. É defensável, mas é uma escolha explícita.
+(proxy direto de minADE, que é best-of-6). Cada um otimiza o que sua
+métrica premia. É defensável, mas é uma escolha explícita.
+
+### 7.4. Calibração do `cls_weight` (loss WTA)
+
+Os dois termos da loss vivem em escalas muito diferentes: a regressão é
+MSE em m² (dezenas a centenas), enquanto a cross-entropy com 6 classes
+parte de ln(6) ≈ 1,79. Com `cls_weight=1.0` a classificação vale ~1% da
+loss total e o gradiente da `score_head` fica afogado.
+
+Diagnóstico implementado em `wta_loss`: além do erro do modo escolhido,
+o script reporta o erro **médio** dos K modos (o que se obteria escolhendo
+ao acaso) e o **rank médio** do modo escolhido no ranking real de
+qualidade (0 = melhor dos 6, 5 = pior, 2,5 = acaso puro).
+
+Medido com `cls_weight=20..100`: rank médio entre 1,0 e 1,5 e erro do
+escolhido ~3x melhor que o acaso. A cabeça de score ranqueia de verdade.
 
 ### Progressão de escala testada
 | Cenários (shards) | Exemplos (agente-alvo) | Observação |
@@ -286,7 +330,7 @@ premia. É defensável, mas é uma escolha explícita.
 | 250 (shard 0, parcial) | 250 (só SDC, versão antiga) | Overfitting evidente |
 | 400 (shard 0 completo, quase) | 1716 (agentes-alvo reais) | Loss estourou p/ milhões (bug de mask), depois corrigido |
 | ~1500 (shards 0,1,2 de `training`) | 6836 | Baseline da seção 8.1 (com contaminação) |
-| idem + ~1500 de `validation` | a medir | Split oficial — resultados pendentes |
+| 1530 de `training` + 879 de `validation` | 6836 treino / 3837 validação | Split oficial — seção 8.2 |
 
 ## 8. Validação oficial (métricas Waymo Motion)
 
@@ -324,24 +368,107 @@ Baseline MLP unimodal sem contexto, 1530 trajetórias avaliadas, 3 shards:
 | Ciclista @5s | 5.28m | 9.36m | 90.8% | 0.0068 |
 | Ciclista @8s | 7.93m | 16.56m | 94.8% | 0.0022 |
 
-**Ponto em aberto:** a origem do número **1530** nunca foi confirmada. Não
-bate com os 6836 agentes-alvo do cache. Hipóteses: truncamento por
-`MAX_AGENTS=12` por cenário, inferência parcial/interrompida, ou execução
-sobre um subconjunto de shards. Como o experimento será refeito com o split
-oficial, o número deixa de importar operacionalmente — fica como nota.
+**Ponto RESOLVIDO em 24/07:** o número **1530** eram **cenários**, não
+trajetórias. O log do op C++ do Waymo imprime `Computing motion metrics
+for N trajectories`, onde N é o tamanho do batch — ou seja, a contagem de
+cenários. O rótulo errado veio do próprio código do Waymo e foi copiado
+para este documento. Não houve inferência parcial nem truncamento.
 
 **Leitura:** números típicos de baseline ingênuo (extrapolação sem contexto),
 bem distantes do estado da arte (faixa de 1-2m de minADE @8s, MissRate bem
 abaixo de 50%).
 
-### 8.2. Resultado com split oficial — A PREENCHER
+### 8.2. Resultado com split oficial (24/07)
 
-Baseline e multimodal, ambos treinados em `cache_train` e avaliados em
-`cache_val`.
+Treino em `cache_train` (shards 0-2 de `training`, 6836 agentes-alvo),
+avaliação em `cache_val` (shards 0-2 de `validation`, 879 cenários /
+3837 agentes-alvo). Sem contaminação treino/validação.
 
-> **Expectativa:** os números do baseline devem **piorar** em relação à
-> seção 8.1. Isso não é regressão — é a medida honesta aparecendo pela
-> primeira vez, sem contaminação treino/validação.
+#### Veículos @8s (n=3324 — a única categoria com amostra sólida)
+
+| Modelo | minADE | minFDE | MissRate | mAP |
+|---|---|---|---|---|
+| Baseline unimodal | 12,94 | 29,72 | 97,7% | 0,0006 |
+| Multimodal cls=1 | 7,78 | 15,81 | 93,0% | 0,0025 |
+| Multimodal cls=20 | **7,29** | **14,91** | 93,8% | 0,0026 |
+| Multimodal cls=50 | 7,38 | 15,29 | 93,1% | 0,0050 |
+| Multimodal cls=100 | 7,47 | 15,29 | 93,0% | **0,0058** |
+
+#### Pedestres @8s (n=417)
+
+| Modelo | minADE | minFDE | MissRate | mAP |
+|---|---|---|---|---|
+| Baseline unimodal | 5,02 | 8,70 | 90,1% | 0,0125 |
+| Multimodal cls=1 | 4,79 | 8,65 | 94,9% | 0,0053 |
+| Multimodal cls=20 | 4,33 | 7,76 | 92,7% | 0,0133 |
+| Multimodal cls=50 | **3,92** | **7,04** | 91,7% | 0,0076 |
+| Multimodal cls=100 | 4,35 | 7,56 | 88,5% | **0,0141** |
+
+#### Ciclistas @8s (n=96 — ⚠️ amostra pequena, números não confiáveis)
+
+| Modelo | minADE | minFDE | MissRate | mAP |
+|---|---|---|---|---|
+| Baseline unimodal | 7,34 | 17,25 | 96,3% | 0,0012 |
+| Multimodal cls=1 | 6,07 | 11,32 | 93,9% | 0,0032 |
+| Multimodal cls=20 | 5,72 | 10,97 | 95,1% | 0,0019 |
+| Multimodal cls=50 | **5,55** | 11,07 | 84,2% | 0,0516 |
+| Multimodal cls=100 | 5,69 | 11,79 | 96,3% | 0,0025 |
+
+> ⚠️ Com 96 exemplos, as métricas de ciclista oscilam sem padrão entre
+> configurações (MissRate varia de 84% a 96% sem relação com o peso). O
+> mAP de 0,0516 do cls=50 é quase certamente ruído amostral, não um
+> resultado. Reportar esta categoria apenas com o n explícito, ou
+> aumentar o número de shards antes de afirmar qualquer coisa sobre ela.
+
+#### Leitura dos resultados
+
+**1. A multimodalidade entregou um ganho grande e real.** Veículos @8s:
+minADE cai 44% (12,94 → 7,29) e minFDE 50% (29,72 → 14,91). Obtido sem
+alterar o backbone, sem adicionar dado e sem contexto novo — apenas
+mudando a formulação da saída (K=6) e a loss (WTA). Confirma que parte
+substancial do erro do baseline vinha de ele ser forçado a prever a média
+de futuros mutuamente incompatíveis.
+
+**2. O trade-off cobertura × ranqueamento é real e controlável.** O mAP
+de veículo cresce monotonicamente com o `cls_weight` (0,0025 → 0,0026 →
+0,0050 → 0,0058, mais que dobrando), enquanto o minADE tem mínimo em
+cls=20 e piora levemente depois. Peso maior na classificação melhora a
+ordenação das hipóteses e degrada um pouco a diversidade delas. É um
+resultado limpo, medido por métrica oficial, sobre duas capacidades que
+a literatura costuma reportar juntas.
+
+**3. O MissRate mal se moveu** (97,7% → 93%). Os thresholds oficiais @8s
+são 3m lateral / 6m longitudinal; com minADE em 7,3m, quase tudo continua
+sendo "miss". As 6 hipóteses cobrem melhor o espaço, mas nenhuma chega
+perto o bastante. **Isso confirma que o gargalo dominante é a ausência de
+contexto (mapa e outros agentes), não a formulação da saída.**
+
+**4. O mAP absoluto continua irrelevante** (~0,006 contra ~0,4 do estado
+da arte). A *tendência* com o `cls_weight` é informativa; o valor, não.
+
+**5. A contaminação anterior teve efeito nulo neste baseline.** Veículo
+@8s: 12,84 (contaminado, seção 8.1) vs 12,94 (limpo). Praticamente
+idêntico — porque um MLP de 113k parâmetros vendo apenas 11 pontos (x,y)
+não tem capacidade de memorizar 6836 trajetórias; ele aprende algo
+próximo de "extrapole a velocidade média" e aplica igualmente a dados
+vistos e não vistos. Contaminação só distorce métrica quando há
+memorização. Isso **não** invalida a correção da seção 5.1: o pipeline
+anterior era indefensável e distorceria os resultados assim que o modelo
+ganhasse capacidade.
+
+**6. `OverlapRate` passou a ser reportado** (não constava na seção 8.1).
+Veículos @8s ficam em ~22% de sobreposição com outros agentes —
+coerente com um modelo que ignora completamente os demais agentes da cena.
+
+#### Ressalvas metodológicas a declarar
+
+- **Uma única seed por configuração.** A diferença entre cls=20 e cls=50
+  em minADE (7,29 vs 7,38) está dentro do que pode ser ruído. Para
+  afirmação forte, repetir com 3 seeds (~2,5 min por configuração).
+- **O `cls_weight` foi escolhido olhando o conjunto de validação**, que é
+  uma forma leve de ajuste ao conjunto de teste. Com 4 configurações o
+  efeito é pequeno, mas a seleção precisa ser registrada como tal.
+- **3 shards de cada split** (~0,3% do `training` disponível).
 
 ## 9. Simplificações deliberadas (documentar na tese como limitação conhecida)
 
@@ -382,26 +509,34 @@ Para a sequência completa do pipeline, ver seção 4.1.
 
 ## 11. Próximos passos possíveis
 
-**Em andamento:**
-1. Multimodal K=6 com loss Winner-Takes-All (seção 7.2) — resultados pendentes.
-2. Adaptar `validate_motion_official.py` para receber as 6 hipóteses e os
-   scores reais (hoje ele monta `prediction_score` com valor único e assume
-   1 modo).
+**Concluído em 24/07:** split oficial, multimodal K=6 com WTA, varredura
+de `cls_weight`, e `validate_motion_official.py` adaptado a K modos.
 
 **Fila, em ordem crescente de esforço:**
-3. Normalização agente-cêntrica (centrar e rotacionar pelo próprio agente-alvo).
+1. **Repetir com 3 seeds** por configuração — barato (~2,5 min cada) e
+   necessário para afirmar que a diferença entre cls=20 e cls=50 é real.
+2. **Mais shards**, prioritariamente para ciclista (n=96 hoje, insuficiente
+   para qualquer conclusão sobre a categoria).
+3. Normalização agente-cêntrica (centrar e rotacionar pelo próprio
+   agente-alvo, em vez de pelo SDC).
 4. Usar mais campos do `full_state` como entrada (velocidade, heading).
-5. Mais shards — ajuda generalização geral, não resolve MissRate alto
-   (que é falta de contexto, não falta de dado).
-6. Encoder sequencial (LSTM/GRU ou Transformer pequeno) sobre o histórico,
+5. Encoder sequencial (LSTM/GRU ou Transformer pequeno) sobre o histórico,
    substituindo o `flatten` dos 11 frames.
-7. Incorporar outros agentes como contexto (salto arquitetural real).
-8. Incorporar roadgraph/mapa. Duas linhagens: raster + CNN (MultiPath,
-   CoverNet) ou vetorizado (VectorNet, LaneGCN). É aqui que a GPU
-   efetivamente trabalha — com 320k parâmetros a RTX 5060 Ti está ociosa,
-   e o gargalo real hoje é CPU/IO no dataloader.
-9. Regularização (dropout, weight decay) e/ou early stopping automático
+6. Incorporar outros agentes como contexto (salto arquitetural real).
+7. Incorporar roadgraph/mapa. Duas linhagens: raster + CNN (MultiPath,
+   CoverNet) ou vetorizado (VectorNet, LaneGCN). **É o item que a seção 8.2
+   aponta como decisivo:** o MissRate travado em ~93% indica falta de
+   contexto, não de formulação. É também onde a GPU efetivamente trabalha —
+   com 320k parâmetros a RTX 5060 Ti fica ociosa, e o gargalo real hoje é
+   CPU/IO no dataloader.
+8. Regularização (dropout, weight decay) e/ou early stopping automático
    se overfitting voltar a aparecer com mais dado.
+
+**Dívida técnica conhecida:** o `WaymoMotionDataset.__getitem__` carrega o
+cenário inteiro (todos os agentes, com `full_state [91,7]` de cada) para
+extrair **um** agente — o mesmo arquivo é desserializado ~4,5 vezes por
+época. Com 6836 amostras pequenas, cachear tudo em RAM no `__init__`
+eliminaria o IO. Não vale otimizar enquanto o treino leva 2s por época.
 
 **Referência de teto:** Wayformer, MTR e SceneTransformer são o estado da
 arte no leaderboard do WOMD. Provavelmente fora de escopo para reimplementar,

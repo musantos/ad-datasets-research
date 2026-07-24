@@ -3,22 +3,46 @@ import numpy as np
 import tensorflow as tf
 from src.core.waymo_decoder import parse_waymo_scenario
 
-DATA_DIR = "/data/hdd3a/waymo_motion/waymo_open_dataset_motion_v_1_3_1/uncompressed/scenario/training"
-CACHE_PATH = "/workspace/datasets/waymo/cache"
-TOTAL_SHARDS = 1000  # total de shards que existem no dataset completo (00000 a 00999)
+# Raiz do dataset DENTRO do container.
+# No host isto e /data/.disks/hdd3a/... ; o docker run monta
+# -v /data/.disks:/data, entao aqui o caminho perde o ".disks".
+SCENARIO_ROOT = "/data/hdd3a/waymo_motion/waymo_open_dataset_motion_v_1_3_1/uncompressed/scenario"
+
+# Configuracao por split OFICIAL do Waymo. Usar a divisao oficial (em vez
+# de um split caseiro dos shards de treino) e o que torna as metricas
+# comparaveis com os papers da area -- todos reportam sobre 'validation',
+# ja que 'testing' nao tem futuro anotado (e so para o leaderboard).
+SPLITS = {
+    "training": {
+        "dir": os.path.join(SCENARIO_ROOT, "training"),
+        "prefix": "training",
+        "total_shards": 1000,
+        "cache": "/workspace/datasets/waymo/cache_train",
+    },
+    "validation": {
+        "dir": os.path.join(SCENARIO_ROOT, "validation"),
+        "prefix": "validation",
+        "total_shards": 150,
+        "cache": "/workspace/datasets/waymo/cache_val",
+    },
+}
 
 
-def build_shard_paths(shard_indices):
+def build_shard_paths(shard_indices, split):
     """
-    Monta os caminhos completos dos shards a partir dos indices numericos.
-    Ex: shard_indices=[0, 1, 2] -> training.tfrecord-00000-of-01000,
-                                    training.tfrecord-00001-of-01000,
-                                    training.tfrecord-00002-of-01000
+    Monta os caminhos completos dos shards de um split a partir dos
+    indices numericos.
+
+    Ex: split="validation", shard_indices=[0, 1, 2] ->
+        validation.tfrecord-00000-of-00150
+        validation.tfrecord-00001-of-00150
+        validation.tfrecord-00002-of-00150
     """
+    cfg = SPLITS[split]
     paths = []
     for idx in shard_indices:
-        fname = f"training.tfrecord-{idx:05d}-of-{TOTAL_SHARDS:05d}"
-        full_path = os.path.join(DATA_DIR, fname)
+        fname = f"{cfg['prefix']}.tfrecord-{idx:05d}-of-{cfg['total_shards']:05d}"
+        full_path = os.path.join(cfg["dir"], fname)
         if os.path.exists(full_path):
             paths.append(full_path)
         else:
@@ -28,8 +52,11 @@ def build_shard_paths(shard_indices):
 
 def preprocess_scenario(scenario):
     """
-    (Sem mudanca de logica em relacao a versao anterior -- so movida para
-    este arquivo v3, que agora suporta multiplos shards de entrada.)
+    Converte um Scenario proto num dicionario com as trajetorias de todos
+    os agentes, em coordenadas relativas ao SDC (origem e rotacao tomadas
+    do frame 10 = fim do passado / presente).
+
+    (Logica inalterada em relacao as versoes anteriores.)
     """
     sdc_idx = scenario.sdc_track_index
     sdc_state = scenario.tracks[sdc_idx].states[10]
@@ -83,20 +110,27 @@ def preprocess_scenario(scenario):
     }
 
 
-def run_extraction(shard_indices, num_scenarios=None):
+def run_extraction(shard_indices, split, num_scenarios=None):
     """
-    shard_indices: lista de indices de shard a processar, ex: [0, 1, 2]
-                   (0 = o shard que voce ja vinha usando).
+    shard_indices: lista de indices de shard a processar, ex: [0, 1, 2].
+    split:         'training' ou 'validation' (split OFICIAL do Waymo).
+                   Determina a pasta de origem, o prefixo dos arquivos, o
+                   total de shards e a pasta de cache de destino.
     num_scenarios: limite TOTAL de cenarios a extrair somando todos os
                    shards. None = processa todos os cenarios disponiveis
                    nos shards informados.
     """
-    if not os.path.exists(CACHE_PATH):
-        os.makedirs(CACHE_PATH, exist_ok=True)
+    if split not in SPLITS:
+        print(f"ERRO: split invalido '{split}'. Use um de: {list(SPLITS)}")
+        return
 
-    shard_paths = build_shard_paths(shard_indices)
+    cache_path = SPLITS[split]["cache"]
+    os.makedirs(cache_path, exist_ok=True)
+    print(f"INFO: split='{split}' -> gravando cache em {cache_path}")
+
+    shard_paths = build_shard_paths(shard_indices, split)
     if not shard_paths:
-        print("ERRO: nenhum shard valido encontrado. Verifique shard_indices e DATA_DIR.")
+        print("ERRO: nenhum shard valido encontrado. Verifique shard_indices e o split.")
         return
 
     print(f"INFO: Lendo {len(shard_paths)} shard(s): {[os.path.basename(p) for p in shard_paths]}")
@@ -121,17 +155,30 @@ def run_extraction(shard_indices, num_scenarios=None):
             if n_target == 0:
                 print(f"AVISO: cenario {processed['scenario_id']} sem agentes-alvo.")
 
-            file_path = os.path.join(CACHE_PATH, f"{processed['scenario_id']}.npy")
+            file_path = os.path.join(cache_path, f"{processed['scenario_id']}.npy")
             np.save(file_path, processed)
             count += 1
 
             if count % 100 == 0:
                 print(f"  ... {count} cenarios processados ate agora")
 
-    print(f"INFO: Extracao concluida. Total de cenarios processados: {count}")
+    print(f"INFO: Extracao concluida. Split='{split}', "
+          f"cenarios processados: {count}, destino: {cache_path}")
 
 
 if __name__ == "__main__":
-    # Exemplo: processar os shards 0, 1 e 2 (0 = o mesmo de antes),
-    # sem limite de cenarios (pega tudo que existir nesses 3 shards).
-    run_extraction(shard_indices=[0, 1, 2], num_scenarios=None)
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Pre-processa shards do Waymo Motion para o cache .npy"
+    )
+    parser.add_argument("--split", default="validation", choices=list(SPLITS),
+                        help="split oficial do Waymo a processar")
+    parser.add_argument("--shards", default="0,1,2",
+                        help="indices dos shards, separados por virgula")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="limite de cenarios (para teste rapido)")
+    args = parser.parse_args()
+
+    indices = [int(s) for s in args.shards.split(",") if s.strip() != ""]
+    run_extraction(shard_indices=indices, split=args.split, num_scenarios=args.limit)
