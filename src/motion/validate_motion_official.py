@@ -1,5 +1,7 @@
 import os
+import csv
 import argparse
+import datetime
 import numpy as np
 import tensorflow as tf
 from google.protobuf import text_format
@@ -8,39 +10,39 @@ from waymo_open_dataset.metrics.ops import py_metrics_ops
 from waymo_open_dataset.metrics.python import config_util_py as config_util
 from waymo_open_dataset.protos import motion_metrics_pb2
 
-# RODAR ESTE SCRIPT NO CONTAINER DE METRICAS (CPU) -- e onde o
-# py_metrics_ops (TF/WOD) existe. Requer que run_inference*.py ja tenha
-# rodado no container de treino e que a pasta de predicoes esteja
-# acessivel aqui (mesmo volume compartilhado do cache).
+# RUN THIS SCRIPT IN THE METRICS CONTAINER (CPU) -- that is where
+# py_metrics_ops (TF/WOD) exists. It requires that run_inference*.py has
+# already run in the training container and that the predictions folder is
+# reachable here (the same shared volume as the cache).
 
-# Avaliacao SEMPRE sobre o split oficial de validacao.
+# Evaluation is ALWAYS on the official validation split.
 CACHE_DIR = "/workspace/datasets/waymo/cache_val"
 DEFAULT_PRED_DIR = "/workspace/datasets/waymo/predictions/baseline"
 
-# Teto de agentes-alvo por cenario. O tutorial oficial usa 128 (todos os
-# agentes possiveis por cenario, com mascara). Aqui simplificamos: como
-# ja filtramos para os agentes-alvo (is_target), o maior numero observado
-# nos logs foi 8 -- deixamos margem de seguranca.
-# Isso e matematicamente equivalente ao approach oficial, pois os slots
-# de padding tem gt_is_valid=False e pred_mask=False, entao nao
-# contribuem para a metrica -- so nao e byte-a-byte identico ao codigo
-# original (que usa 128 slots fixos representando TODOS os agentes da
-# cena, alvo ou nao).
+# Cap on target agents per scenario. The official tutorial uses 128 (every
+# possible agent per scenario, with a mask). Here we simplify: since we
+# already filter to target agents (is_target), the largest count seen in
+# the logs was 8 -- we keep a safety margin.
+# This is mathematically equivalent to the official approach, because the
+# padding slots have gt_is_valid=False and pred_mask=False, so they do not
+# contribute to the metric -- it just is not byte-for-byte identical to the
+# original code (which uses 128 fixed slots representing ALL agents in the
+# scene, target or not).
 MAX_AGENTS = 12
 
 TRACK_STEPS_PER_SECOND = 10
 PREDICTION_STEPS_PER_SECOND = 2
 TG = 91  # track_history_samples(10) + 1 + track_future_samples(80)
 
-# Numero de passos da predicao apos o downsample para 2Hz.
+# Number of prediction steps after downsampling to 2Hz.
 PRED_STEPS = 16
 
-# Teto de modos suportado. Casa com max_predictions da config oficial.
+# Cap on supported modes. Matches max_predictions in the official config.
 MAX_MODES = 6
 
 
 def build_config():
-    """Config oficial do challenge, extraido do tutorial_motion_original.ipynb."""
+    """Official challenge config, taken from tutorial_motion_original.ipynb."""
     config = motion_metrics_pb2.MotionMetricsConfig()
     config_text = """
     track_steps_per_second: 10
@@ -74,32 +76,32 @@ def build_config():
 
 def unpack_prediction(entry):
     """
-    Normaliza a predicao de um agente para (trajetorias [K,80,2], scores [K]).
+    Normalize an agent's prediction to (trajectories [K,80,2], scores [K]).
 
-    Aceita os dois formatos gravados pelos scripts de inferencia:
+    Accepts the two formats written by the inference scripts:
 
       - UNIMODAL   (run_inference.py):
             np.ndarray [80, 2]
-        -> vira K=1 com score 1.0, que reproduz exatamente o
-           comportamento anterior deste script.
+        -> becomes K=1 with score 1.0, which reproduces exactly the
+           previous behavior of this script.
 
       - MULTIMODAL (run_inference_multimodal.py):
             {'trajectories': [K, 80, 2], 'scores': [K]}
 
-    A deteccao e por tipo, nao por flag: assim o mesmo script avalia os
-    dois tipos de modelo sem parametro extra e sem risco de o usuario
-    escolher o modo errado.
+    Detection is by type, not by flag: this way the same script evaluates
+    both model types with no extra parameter and no risk of the user
+    picking the wrong mode.
     """
     if isinstance(entry, dict):
         traj = np.asarray(entry['trajectories'], dtype=np.float32)  # [K, 80, 2]
         scores = np.asarray(entry['scores'], dtype=np.float32)      # [K]
         if traj.ndim != 3:
-            raise ValueError(f"trajetorias multimodais com ndim={traj.ndim}, esperado 3")
+            raise ValueError(f"multimodal trajectories with ndim={traj.ndim}, expected 3")
         return traj, scores
 
     traj = np.asarray(entry, dtype=np.float32)                      # [80, 2]
     if traj.ndim != 2:
-        raise ValueError(f"trajetoria unimodal com ndim={traj.ndim}, esperado 2")
+        raise ValueError(f"unimodal trajectory with ndim={traj.ndim}, expected 2")
     return traj[None, ...], np.ones((1,), dtype=np.float32)
 
 
@@ -115,20 +117,20 @@ def build_scenario_tensors(cache_path, pred_path, n_modes):
     if n == 0:
         return None
     if n > MAX_AGENTS:
-        print(f"AVISO: cenario {data['scenario_id']} tem {n} agentes-alvo, "
-              f"acima do MAX_AGENTS={MAX_AGENTS}. Truncando (aumente MAX_AGENTS).")
+        print(f"WARNING: scenario {data['scenario_id']} has {n} target agents, "
+              f"above MAX_AGENTS={MAX_AGENTS}. Truncating (increase MAX_AGENTS).")
 
     gt_traj = np.zeros((MAX_AGENTS, TG, 7), dtype=np.float32)
     gt_valid = np.zeros((MAX_AGENTS, TG), dtype=bool)
     obj_type = np.zeros((MAX_AGENTS,), dtype=np.int64)
     obj_id = np.zeros((MAX_AGENTS,), dtype=np.int64)
 
-    # Agora com dimensao de modo: [MAX_AGENTS, K, 16, 2] e [MAX_AGENTS, K].
+    # Now with a mode dimension: [MAX_AGENTS, K, 16, 2] and [MAX_AGENTS, K].
     pred_traj = np.zeros((MAX_AGENTS, n_modes, PRED_STEPS, 2), dtype=np.float32)
     pred_score = np.zeros((MAX_AGENTS, n_modes), dtype=np.float32)
     pred_mask = np.zeros((MAX_AGENTS,), dtype=bool)
 
-    # Formula oficial de downsampling (10Hz -> 2Hz), do tutorial:
+    # Official downsampling formula (10Hz -> 2Hz), from the tutorial:
     # prediction_trajectory[..., (interval - 1)::interval, :]
     interval = TRACK_STEPS_PER_SECOND // PREDICTION_STEPS_PER_SECOND  # 5
 
@@ -146,10 +148,10 @@ def build_scenario_tensors(cache_path, pred_path, n_modes):
         pred_traj[i, :k] = sub_pred
         pred_score[i, :k] = scores[:k]
 
-        # Se o modelo produziu menos modos que n_modes, os slots restantes
-        # ficam com trajetoria zerada e score 0. Score 0 faz a metrica
-        # ranquea-los por ultimo; como minADE/minFDE sao best-of-K, um modo
-        # extra ruim nao piora o resultado.
+        # If the model produced fewer modes than n_modes, the remaining
+        # slots keep a zeroed trajectory and score 0. A score of 0 makes the
+        # metric rank them last; since minADE/minFDE are best-of-K, an extra
+        # bad mode does not worsen the result.
         pred_mask[i] = True
         n_used += 1
 
@@ -168,8 +170,8 @@ def build_scenario_tensors(cache_path, pred_path, n_modes):
 
 def detect_n_modes(pred_dir, files):
     """
-    Descobre quantos modos as predicoes tem, olhando o primeiro arquivo
-    valido. Evita ter que passar isso por parametro e errar.
+    Determine how many modes the predictions have by looking at the first
+    valid file. Avoids having to pass this as a parameter and get it wrong.
     """
     for fname in files:
         path = os.path.join(pred_dir, fname)
@@ -182,26 +184,63 @@ def detect_n_modes(pred_dir, files):
     return 1
 
 
-def run_validation(pred_dir):
+def default_csv_path(pred_dir):
+    """
+    Build a default CSV path so that different runs do not overwrite each
+    other: results/metrics_<tag>_<YYYY-MM-DD>.csv, where <tag> is the name
+    of the predictions folder (e.g. 'baseline', 'multimodal_cls20').
+    """
+    tag = os.path.basename(os.path.normpath(pred_dir))
+    date = datetime.date.today().isoformat()
+    return os.path.join("results", f"metrics_{tag}_{date}.csv")
+
+
+def write_metrics_csv(csv_path, pred_dir, kind, metric_names,
+                      min_ade, min_fde, miss_rate, overlap_rate,
+                      mean_average_precision):
+    """
+    Write one row per breakdown to a simple CSV. Columns:
+    breakdown_name, minADE, minFDE, MissRate, OverlapRate, mAP.
+    The predictions folder and detected format go in a header comment line.
+    """
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([f"# pred_dir={pred_dir}", f"format={kind}"])
+        writer.writerow(["breakdown_name", "minADE", "minFDE",
+                         "MissRate", "OverlapRate", "mAP"])
+        for i, name in enumerate(metric_names):
+            writer.writerow([
+                name,
+                f"{float(min_ade[i]):.4f}",
+                f"{float(min_fde[i]):.4f}",
+                f"{float(miss_rate[i]):.4f}",
+                f"{float(overlap_rate[i]):.4f}",
+                f"{float(mean_average_precision[i]):.4f}",
+            ])
+    print(f"INFO: metrics written to {csv_path}")
+
+
+def run_validation(pred_dir, csv_path=None):
     config = build_config()
     metric_names = config_util.get_breakdown_names_from_motion_config(config)
 
     if not os.path.isdir(pred_dir):
-        print(f"ERRO: pasta de predicoes nao encontrada: {pred_dir}")
+        print(f"ERROR: predictions folder not found: {pred_dir}")
         return
 
     files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.npy')]
 
     n_modes = detect_n_modes(pred_dir, files)
     if n_modes > MAX_MODES:
-        print(f"AVISO: predicoes com {n_modes} modos, acima de max_predictions="
-              f"{MAX_MODES}. Usando os {MAX_MODES} primeiros.")
+        print(f"WARNING: predictions with {n_modes} modes, above max_predictions="
+              f"{MAX_MODES}. Using the first {MAX_MODES}.")
         n_modes = MAX_MODES
 
     kind = "UNIMODAL" if n_modes == 1 else f"MULTIMODAL (K={n_modes})"
     print(f"INFO: cache  = {CACHE_DIR}")
-    print(f"INFO: predic = {pred_dir}")
-    print(f"INFO: formato detectado = {kind}")
+    print(f"INFO: preds  = {pred_dir}")
+    print(f"INFO: detected format = {kind}")
 
     all_gt_traj, all_gt_valid = [], []
     all_obj_type, all_obj_id, all_scenario_id = [], [], []
@@ -225,11 +264,11 @@ def run_validation(pred_dir):
         all_obj_id.append(t['object_id'][None])
         all_scenario_id.append(t['scenario_id'])
 
-        # Shape esperado pela API:
-        #   [batch, grupos, top_k, agentes_por_grupo, steps, 2]
-        # Aqui: grupos = MAX_AGENTS (1 agente por grupo), top_k = n_modes.
-        # A versao anterior deste script fixava top_k=1; e a unica mudanca
-        # estrutural necessaria para avaliar o modelo multimodal.
+        # Shape expected by the API:
+        #   [batch, groups, top_k, agents_per_group, steps, 2]
+        # Here: groups = MAX_AGENTS (1 agent per group), top_k = n_modes.
+        # The previous version of this script fixed top_k=1; this is the only
+        # structural change needed to evaluate the multimodal model.
         pred = t['pred_trajectory'][None, :, :, None, :, :]  # [1, MAX_AGENTS, K, 1, 16, 2]
         score = t['pred_score'][None]                        # [1, MAX_AGENTS, K]
         idx = np.tile(np.arange(MAX_AGENTS, dtype=np.int64)[None, :, None], (1, 1, 1))
@@ -244,13 +283,13 @@ def run_validation(pred_dir):
         n_trajectories += t['n_agents']
 
     if n_scenarios == 0:
-        print("ERRO: nenhum cenario com predicoes encontrado. "
-              "Rode run_inference primeiro (no container de treino) e "
-              "confirme que a pasta de predicoes e visivel aqui.")
+        print("ERROR: no scenario with predictions found. "
+              "Run run_inference first (in the training container) and "
+              "confirm the predictions folder is visible here.")
         return
 
-    print(f"INFO: validando {n_scenarios} cenarios / {n_trajectories} trajetorias-alvo "
-          f"com as metricas oficiais do Waymo Motion...")
+    print(f"INFO: validating {n_scenarios} scenarios / {n_trajectories} target trajectories "
+          f"with the official Waymo Motion metrics...")
 
     gt_trajectory = np.concatenate(all_gt_traj, axis=0)
     gt_is_valid = np.concatenate(all_gt_valid, axis=0)
@@ -263,8 +302,8 @@ def run_validation(pred_dir):
     prediction_ground_truth_indices = np.concatenate(all_pred_idx, axis=0)
     prediction_ground_truth_indices_mask = np.concatenate(all_pred_idx_mask, axis=0)
 
-    print(f"INFO: shape de prediction_trajectory = {prediction_trajectory.shape}")
-    print(f"INFO: shape de prediction_score      = {prediction_score.shape}")
+    print(f"INFO: prediction_trajectory shape = {prediction_trajectory.shape}")
+    print(f"INFO: prediction_score      shape = {prediction_score.shape}")
 
     (min_ade, min_fde, miss_rate, overlap_rate,
      mean_average_precision) = py_metrics_ops.motion_metrics(
@@ -281,8 +320,8 @@ def run_validation(pred_dir):
     )
 
     print("\n" + "=" * 50)
-    print("RESULTADO DA VALIDACAO OFICIAL (Waymo Motion Metrics)")
-    print(f"Predicoes: {pred_dir}  |  formato: {kind}")
+    print("OFFICIAL VALIDATION RESULT (Waymo Motion Metrics)")
+    print(f"Predictions: {pred_dir}  |  format: {kind}")
     print("=" * 50)
     for i, name in enumerate(metric_names):
         print(f"\n[{name}]")
@@ -292,13 +331,21 @@ def run_validation(pred_dir):
         print(f"  OverlapRate: {float(overlap_rate[i]):.4f}")
         print(f"  mAP:         {float(mean_average_precision[i]):.4f}")
 
+    if csv_path is None:
+        csv_path = default_csv_path(pred_dir)
+    write_metrics_csv(csv_path, pred_dir, kind, metric_names,
+                      min_ade, min_fde, miss_rate, overlap_rate,
+                      mean_average_precision)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Calcula as metricas oficiais do Waymo Motion sobre o split de validacao"
+        description="Compute the official Waymo Motion metrics over the validation split"
     )
     parser.add_argument("--pred-dir", default=DEFAULT_PRED_DIR,
-                        help="pasta com as predicoes a avaliar")
+                        help="folder with the predictions to evaluate")
+    parser.add_argument("--csv", default=None,
+                        help="output CSV path (default: results/metrics_<tag>_<date>.csv)")
     args = parser.parse_args()
 
-    run_validation(pred_dir=args.pred_dir)
+    run_validation(pred_dir=args.pred_dir, csv_path=args.csv)
