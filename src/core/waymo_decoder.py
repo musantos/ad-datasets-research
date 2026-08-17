@@ -2,14 +2,12 @@ from waymo_open_dataset.protos import scenario_pb2
 
 def parse_waymo_scenario(serialized_data):
     """
-    Decodifica um cenario binario (Scenario proto) do Waymo Motion.
-    Retorna um objeto Scenario com todos os atributos acessiveis.
+    Decodes a binary scenario (Scenario proto) from Waymo Motion.
+    Returns a Scenario object with all attributes accessible.
     """
     scenario = scenario_pb2.Scenario()
     scenario.ParseFromString(bytearray(serialized_data.numpy()))
     return scenario
 
 if __name__ == "__main__":
-    print("OK: Decodificador de Scenarios carregado.")
-
-
+    print("OK: Scenario decoder loaded.")

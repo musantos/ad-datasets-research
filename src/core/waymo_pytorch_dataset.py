@@ -6,10 +6,10 @@ from torch.utils.data import Dataset
 
 class WaymoMotionDataset(Dataset):
     """
-    v4: adiciona o tipo do agente (agent['type']) ao retorno de
-    __getitem__, para permitir reportar a loss separada por categoria
-    (Veiculo / Pedestre / Ciclista) em vez de só um numero geral que
-    mistura os tres.
+    v4: adds the agent type (agent['type']) to the return of
+    __getitem__, to allow reporting the loss separately per category
+    (Vehicle / Pedestrian / Cyclist) instead of just a general number that
+    mixes the three.
     """
 
     def __init__(self, cache_dir):
@@ -17,7 +17,7 @@ class WaymoMotionDataset(Dataset):
         file_list = [f for f in os.listdir(cache_dir) if f.endswith('.npy')]
 
         if len(file_list) == 0:
-            print(f"AVISO: Nenhum arquivo encontrado em {cache_dir}")
+            print(f"WARNING: No file found in {cache_dir}")
 
         self.samples = []
         for fname in file_list:
@@ -28,7 +28,7 @@ class WaymoMotionDataset(Dataset):
                     self.samples.append((path, agent['id']))
 
         if len(self.samples) == 0 and len(file_list) > 0:
-            print(f"AVISO: nenhum agente com is_target=True encontrado em {cache_dir}.")
+            print(f"WARNING: no agent with is_target=True found in {cache_dir}.")
 
     def __len__(self):
         return len(self.samples)
@@ -40,7 +40,7 @@ class WaymoMotionDataset(Dataset):
         agent = next((a for a in data['agents'] if a['id'] == target_id), None)
         if agent is None:
             raise RuntimeError(
-                f"Agente id={target_id} nao encontrado em {file_path}."
+                f"Agent id={target_id} not found in {file_path}."
             )
 
         traj = agent['trajectory'].copy()
@@ -60,4 +60,4 @@ class WaymoMotionDataset(Dataset):
 
 
 if __name__ == "__main__":
-    print("OK: Classe WaymoMotionDataset (v4, com tipo de agente) pronta.")
+    print("OK: WaymoMotionDataset class (v4, with agent type) ready.")

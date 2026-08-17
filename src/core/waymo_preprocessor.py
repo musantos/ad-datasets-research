@@ -3,15 +3,15 @@ import numpy as np
 import tensorflow as tf
 from src.core.waymo_decoder import parse_waymo_scenario
 
-# Raiz do dataset DENTRO do container.
-# No host isto e /data/.disks/hdd3a/... ; o docker run monta
-# -v /data/.disks:/data, entao aqui o caminho perde o ".disks".
+# Dataset root INSIDE the container.
+# On the host this is /data/.disks/hdd3a/... ; the docker run mounts
+# -v /data/.disks:/data, so here the path loses the ".disks".
 SCENARIO_ROOT = "/data/hdd3a/waymo_motion/waymo_open_dataset_motion_v_1_3_1/uncompressed/scenario"
 
-# Configuracao por split OFICIAL do Waymo. Usar a divisao oficial (em vez
-# de um split caseiro dos shards de treino) e o que torna as metricas
-# comparaveis com os papers da area -- todos reportam sobre 'validation',
-# ja que 'testing' nao tem futuro anotado (e so para o leaderboard).
+# Configuration per OFFICIAL Waymo split. Using the official split (instead
+# of a homemade split of the training shards) is what makes the metrics
+# comparable with the papers in the field -- they all report on 'validation',
+# since 'testing' has no annotated future (it is only for the leaderboard).
 SPLITS = {
     "training": {
         "dir": os.path.join(SCENARIO_ROOT, "training"),
@@ -30,8 +30,7 @@ SPLITS = {
 
 def build_shard_paths(shard_indices, split):
     """
-    Monta os caminhos completos dos shards de um split a partir dos
-    indices numericos.
+    Builds the full shard paths of a split from the numeric indices.
 
     Ex: split="validation", shard_indices=[0, 1, 2] ->
         validation.tfrecord-00000-of-00150
@@ -46,17 +45,17 @@ def build_shard_paths(shard_indices, split):
         if os.path.exists(full_path):
             paths.append(full_path)
         else:
-            print(f"AVISO: shard nao encontrado no disco, pulando: {full_path}")
+            print(f"WARNING: shard not found on disk, skipping: {full_path}")
     return paths
 
 
 def preprocess_scenario(scenario):
     """
-    Converte um Scenario proto num dicionario com as trajetorias de todos
-    os agentes, em coordenadas relativas ao SDC (origem e rotacao tomadas
-    do frame 10 = fim do passado / presente).
+    Converts a Scenario proto into a dictionary with the trajectories of all
+    agents, in coordinates relative to the SDC (origin and rotation taken
+    from frame 10 = end of history / present).
 
-    (Logica inalterada em relacao as versoes anteriores.)
+    (Logic unchanged relative to previous versions.)
     """
     sdc_idx = scenario.sdc_track_index
     sdc_state = scenario.tracks[sdc_idx].states[10]
@@ -112,31 +111,31 @@ def preprocess_scenario(scenario):
 
 def run_extraction(shard_indices, split, num_scenarios=None):
     """
-    shard_indices: lista de indices de shard a processar, ex: [0, 1, 2].
-    split:         'training' ou 'validation' (split OFICIAL do Waymo).
-                   Determina a pasta de origem, o prefixo dos arquivos, o
-                   total de shards e a pasta de cache de destino.
-    num_scenarios: limite TOTAL de cenarios a extrair somando todos os
-                   shards. None = processa todos os cenarios disponiveis
-                   nos shards informados.
+    shard_indices: list of shard indices to process, e.g. [0, 1, 2].
+    split:         'training' or 'validation' (OFFICIAL Waymo split).
+                   Determines the source folder, the file prefix, the
+                   total number of shards and the destination cache folder.
+    num_scenarios: TOTAL limit of scenarios to extract across all
+                   shards. None = processes all scenarios available
+                   in the given shards.
     """
     if split not in SPLITS:
-        print(f"ERRO: split invalido '{split}'. Use um de: {list(SPLITS)}")
+        print(f"ERROR: invalid split '{split}'. Use one of: {list(SPLITS)}")
         return
 
     cache_path = SPLITS[split]["cache"]
     os.makedirs(cache_path, exist_ok=True)
-    print(f"INFO: split='{split}' -> gravando cache em {cache_path}")
+    print(f"INFO: split='{split}' -> writing cache to {cache_path}")
 
     shard_paths = build_shard_paths(shard_indices, split)
     if not shard_paths:
-        print("ERRO: nenhum shard valido encontrado. Verifique shard_indices e o split.")
+        print("ERROR: no valid shard found. Check shard_indices and the split.")
         return
 
-    print(f"INFO: Lendo {len(shard_paths)} shard(s): {[os.path.basename(p) for p in shard_paths]}")
+    print(f"INFO: Reading {len(shard_paths)} shard(s): {[os.path.basename(p) for p in shard_paths]}")
 
-    # TFRecordDataset aceita uma LISTA de arquivos diretamente -- concatena
-    # a leitura de todos os shards em sequencia.
+    # TFRecordDataset accepts a LIST of files directly -- concatenates
+    # the reading of all shards in sequence.
     dataset = tf.data.TFRecordDataset(shard_paths, compression_type='')
 
     count = 0
@@ -151,33 +150,33 @@ def run_extraction(shard_indices, split, num_scenarios=None):
             n_sdc = sum(1 for a in processed['agents'] if a['is_sdc'])
             n_target = sum(1 for a in processed['agents'] if a['is_target'])
             if n_sdc != 1:
-                print(f"AVISO: cenario {processed['scenario_id']} tem {n_sdc} agentes SDC (esperado 1).")
+                print(f"WARNING: scenario {processed['scenario_id']} has {n_sdc} SDC agents (expected 1).")
             if n_target == 0:
-                print(f"AVISO: cenario {processed['scenario_id']} sem agentes-alvo.")
+                print(f"WARNING: scenario {processed['scenario_id']} has no target agents.")
 
             file_path = os.path.join(cache_path, f"{processed['scenario_id']}.npy")
             np.save(file_path, processed)
             count += 1
 
             if count % 100 == 0:
-                print(f"  ... {count} cenarios processados ate agora")
+                print(f"  ... {count} scenarios processed so far")
 
-    print(f"INFO: Extracao concluida. Split='{split}', "
-          f"cenarios processados: {count}, destino: {cache_path}")
+    print(f"INFO: Extraction complete. Split='{split}', "
+          f"scenarios processed: {count}, destination: {cache_path}")
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Pre-processa shards do Waymo Motion para o cache .npy"
+        description="Pre-processes Waymo Motion shards into the .npy cache"
     )
     parser.add_argument("--split", default="validation", choices=list(SPLITS),
-                        help="split oficial do Waymo a processar")
+                        help="official Waymo split to process")
     parser.add_argument("--shards", default="0,1,2",
-                        help="indices dos shards, separados por virgula")
+                        help="shard indices, comma-separated")
     parser.add_argument("--limit", type=int, default=None,
-                        help="limite de cenarios (para teste rapido)")
+                        help="scenario limit (for quick testing)")
     args = parser.parse_args()
 
     indices = [int(s) for s in args.shards.split(",") if s.strip() != ""]
