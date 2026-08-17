@@ -5,14 +5,14 @@ import torch
 
 from src.motion.multimodal_model import MultimodalTrajectoryPredictor
 
-# RODAR ESTE SCRIPT NO CONTAINER DE TREINO (GPU) -- e onde o PyTorch e o
-# checkpoint treinado existem.
+# RUN THIS SCRIPT IN THE TRAINING CONTAINER (GPU) -- that's where PyTorch and
+# the trained checkpoint exist.
 
 NUM_MODES = 6
 
-# Inferencia SO sobre o cache de validacao (split oficial). A versao
-# antiga varria o cache inteiro, que continha os dados de treino -- as
-# metricas resultantes mediam memorizacao junto com generalizacao.
+# Inference ONLY over the validation cache (official split). The old version
+# scanned the entire cache, which contained the training data -- the
+# resulting metrics measured memorization together with generalization.
 CACHE_DIR = "/workspace/datasets/waymo/cache_val"
 CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
 PRED_ROOT = "/workspace/datasets/waymo/predictions"
@@ -20,9 +20,9 @@ PRED_ROOT = "/workspace/datasets/waymo/predictions"
 
 def run_inference(tag):
     """
-    tag: identifica o experimento, ex: 'cls20'.
+    tag: identifies the experiment, e.g. 'cls20'.
          Checkpoint: experiments/checkpoints/multimodal_<tag>/multimodal_best.pth
-         Saida:      datasets/waymo/predictions/multimodal_<tag>/
+         Output:     datasets/waymo/predictions/multimodal_<tag>/
     """
     checkpoint_path = os.path.join(
         CHECKPOINT_ROOT, f"multimodal_{tag}", "multimodal_best.pth"
@@ -30,9 +30,9 @@ def run_inference(tag):
     pred_dir = os.path.join(PRED_ROOT, f"multimodal_{tag}")
 
     if not os.path.exists(checkpoint_path):
-        print(f"[ERRO] Checkpoint nao encontrado: {checkpoint_path}")
-        disponiveis = [d for d in os.listdir(CHECKPOINT_ROOT) if d.startswith("multimodal")]
-        print(f"       Pastas disponiveis: {sorted(disponiveis)}")
+        print(f"[ERROR] Checkpoint not found: {checkpoint_path}")
+        available = [d for d in os.listdir(CHECKPOINT_ROOT) if d.startswith("multimodal")]
+        print(f"       Available folders: {sorted(available)}")
         return
 
     os.makedirs(pred_dir, exist_ok=True)
@@ -46,12 +46,12 @@ def run_inference(tag):
 
     files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.npy')]
     if not files:
-        print(f"[ERRO] Cache de validacao vazio: {CACHE_DIR}")
+        print(f"[ERROR] Empty validation cache: {CACHE_DIR}")
         return
 
     print(f"INFO: checkpoint = {checkpoint_path}")
-    print(f"INFO: saida      = {pred_dir}")
-    print(f"INFO: gerando predicoes multimodais para ate {len(files)} cenarios...")
+    print(f"INFO: output     = {pred_dir}")
+    print(f"INFO: generating multimodal predictions for up to {len(files)} scenarios...")
 
     n_done = 0
     n_agents = 0
@@ -65,8 +65,8 @@ def run_inference(tag):
                 if not agent.get('is_target', False):
                     continue
 
-                # Mesma logica de zerar frames invalidos do passado usada
-                # no treino (waymo_pytorch_dataset.py).
+                # Same logic of zeroing invalid past frames used in training
+                # (waymo_pytorch_dataset.py).
                 traj = agent['trajectory'].copy()
                 mask = agent['mask']
                 traj[~mask] = 0.0
@@ -75,16 +75,16 @@ def run_inference(tag):
                 x_past = x_past.unsqueeze(0).to(device)  # [1, 11, 2]
 
                 traj_out, scores = model(x_past)
-                # traj_out: [1, K, 80, 2] a 10Hz (mesma taxa do treino)
-                # scores:   [1, K] em LOGITS
+                # traj_out: [1, K, 80, 2] at 10Hz (same rate as training)
+                # scores:   [1, K] in LOGITS
 
-                # Softmax aqui, e nao no modelo: a metrica oficial usa os
-                # scores para ranquear as hipoteses no calculo do mAP.
+                # Softmax here, and not in the model: the official metric uses
+                # the scores to rank the hypotheses in the mAP computation.
                 probs = torch.softmax(scores, dim=1)
 
-                # Ordenar por probabilidade decrescente. A metrica nao
-                # exige ordem, mas ter o modo mais provavel no indice 0
-                # facilita inspecao e eventual corte de top-k.
+                # Sort by descending probability. The metric does not require
+                # any ordering, but having the most likely mode at index 0
+                # makes inspection and possible top-k cutting easier.
                 order = torch.argsort(probs[0], descending=True)
 
                 preds[agent['id']] = {
@@ -98,19 +98,19 @@ def run_inference(tag):
                 n_done += 1
 
             if (i + 1) % 200 == 0:
-                print(f"  ... {i+1}/{len(files)} cenarios processados")
+                print(f"  ... {i+1}/{len(files)} scenarios processed")
 
-    print(f"[SUCESSO] Predicoes salvas em {pred_dir}")
-    print(f"          {n_done} cenarios | {n_agents} trajetorias-alvo "
-          f"(x{NUM_MODES} modos cada).")
+    print(f"[SUCCESS] Predictions saved in {pred_dir}")
+    print(f"          {n_done} scenarios | {n_agents} target trajectories "
+          f"(x{NUM_MODES} modes each).")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Gera predicoes multimodais sobre o split de validacao"
+        description="Generates multimodal predictions over the validation split"
     )
     parser.add_argument("--tag", required=True,
-                        help="identificador do experimento, ex: cls1, cls20, cls50, cls100")
+                        help="experiment identifier, e.g. cls1, cls20, cls50, cls100")
     args = parser.parse_args()
 
     run_inference(tag=args.tag)

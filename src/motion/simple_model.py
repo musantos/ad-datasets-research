@@ -4,13 +4,13 @@ import torch.nn as nn
 class SimpleTrajectoryPredictor(nn.Module):
     def __init__(self, input_steps=11, output_steps=80):
         super(SimpleTrajectoryPredictor, self).__init__()
-        
-        # Entrada: 11 frames * 2 coordenadas (x,y) = 22 numeros
+
+        # Input: 11 frames * 2 coordinates (x,y) = 22 numbers
         self.input_dim = input_steps * 2
-        # Saida: 80 frames * 2 coordenadas (x,y) = 160 numeros
+        # Output: 80 frames * 2 coordinates (x,y) = 160 numbers
         self.output_dim = output_steps * 2
-        
-        # Uma rede simples com 2 camadas escondidas
+
+        # A simple network with 2 hidden layers
         self.network = nn.Sequential(
             nn.Linear(self.input_dim, 256),
             nn.ReLU(),
@@ -20,22 +20,22 @@ class SimpleTrajectoryPredictor(nn.Module):
         )
 
     def forward(self, x):
-        # x chega como [batch, 11, 2]
+        # x arrives as [batch, 11, 2]
         batch_size = x.shape[0]
-        
-        # Achatar para [batch, 22]
+
+        # Flatten to [batch, 22]
         x = x.view(batch_size, -1)
-        
-        # Passar pela rede
+
+        # Pass through the network
         prediction = self.network(x)
-        
-        # Voltar para o formato [batch, 80, 2]
+
+        # Reshape back to [batch, 80, 2]
         return prediction.view(batch_size, 80, 2)
 
 if __name__ == "__main__":
     model = SimpleTrajectoryPredictor()
-    print("OK: Modelo de Predicao carregado.")
-    # Teste de shape
+    print("OK: Prediction model loaded.")
+    # Shape test
     test_input = torch.randn(2, 11, 2)
     output = model(test_input)
-    print(f"Shape da Predicao: {output.shape}") # Esperado: [2, 80, 2]
+    print(f"Prediction shape: {output.shape}")  # Expected: [2, 80, 2]

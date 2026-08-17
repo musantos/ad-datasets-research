@@ -9,46 +9,46 @@ from torch.utils.data import DataLoader
 from src.core.waymo_pytorch_dataset import WaymoMotionDataset
 from src.motion.multimodal_model import MultimodalTrajectoryPredictor
 
-# Mapeamento do enum Object.Type do proto do Waymo (mesmo do baseline).
+# Mapping of the Object.Type enum from the Waymo proto (same as the baseline).
 OBJECT_TYPE_NAMES = {
     0: "UNSET",
-    1: "VEICULO",
-    2: "PEDESTRE",
-    3: "CICLISTA",
-    4: "OUTRO",
+    1: "VEHICLE",
+    2: "PEDESTRIAN",
+    3: "CYCLIST",
+    4: "OTHER",
 }
 
-NUM_MODES = 6          # casa com max_predictions=6 da config oficial
+NUM_MODES = 6          # matches max_predictions=6 from the official config
 EPOCHS = 25
 BATCH_SIZE = 64
 LR = 1e-3
 
-# SPLIT OFICIAL DO WAYMO -- nao ha random_split.
-# Treino e validacao vem de shards DIFERENTES de splits DIFERENTES, entao
-# nao existe possibilidade de vazamento: sao cenarios distintos. Isso
-# tambem torna os numeros comparaveis com a literatura, que reporta sobre
-# o split 'validation'.
+# OFFICIAL WAYMO SPLIT -- there is no random_split.
+# Training and validation come from DIFFERENT shards of DIFFERENT splits, so
+# there is no possibility of leakage: they are distinct scenarios. This also
+# makes the numbers comparable with the literature, which reports on the
+# 'validation' split.
 TRAIN_CACHE = "/workspace/datasets/waymo/cache_train"
 VAL_CACHE = "/workspace/datasets/waymo/cache_val"
 
-# Raiz dos checkpoints. A pasta final inclui o cls_weight usado, para que
-# rodadas da varredura nao se sobrescrevam.
+# Root of the checkpoints. The final folder includes the cls_weight used, so
+# that sweep runs don't overwrite each other.
 CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
 
 
 def masked_mse_per_mode(outputs, targets, mask):
     """
-    Erro quadratico medio mascarado de CADA modo, por exemplo do batch.
+    Masked mean squared error of EACH mode, per example in the batch.
 
-    outputs: [batch, K, 80, 2]  -- as K hipoteses
-    targets: [batch, 80, 2]     -- o ground truth (unico)
-    mask:    [batch, 80]        -- 1 onde o frame futuro e valido
+    outputs: [batch, K, 80, 2]  -- the K hypotheses
+    targets: [batch, 80, 2]     -- the ground truth (single)
+    mask:    [batch, 80]        -- 1 where the future frame is valid
 
-    Retorna: [batch, K]
+    Returns: [batch, K]
 
-    A mascara e essencial: agentes que saem de visibilidade tem frames
-    invalidos zerados no dataset, e sem mascarar o modelo seria punido
-    por nao prever zeros.
+    The mask is essential: agents that leave visibility have invalid frames
+    zeroed out in the dataset, and without masking the model would be
+    punished for not predicting zeros.
     """
     targets = targets.unsqueeze(1)                 # [B, 1, 80, 2]
     mask_exp = mask.unsqueeze(1).unsqueeze(-1)     # [B, 1, 80, 1]
@@ -64,31 +64,33 @@ def masked_mse_per_mode(outputs, targets, mask):
 
 def wta_loss(outputs, scores, targets, mask, cls_weight):
     """
-    Loss Winner-Takes-All (WTA).
+    Winner-Takes-All (WTA) loss.
 
-    Ideia: dos K modos, so o mais proximo do ground truth recebe gradiente
-    de regressao. Os outros ficam livres para cobrir hipoteses alternativas
-    em vez de serem puxados para a media -- que e exatamente o que se quer
-    num problema multimodal (num cruzamento, "virar" e "seguir reto" sao
-    ambas corretas, e a media das duas nao e uma trajetoria plausivel).
+    Idea: of the K modes, only the one closest to the ground truth receives
+    regression gradient. The others are free to cover alternative hypotheses
+    instead of being pulled toward the average -- which is exactly what you
+    want in a multimodal problem (at an intersection, "turn" and "go
+    straight" are both correct, and the average of the two is not a
+    plausible trajectory).
 
-    Em paralelo, a cabeca de score aprende via cross-entropy qual modo foi
-    o vencedor. Sem esse termo o modelo teria K trajetorias mas nenhuma
-    nocao de qual e a mais provavel -- e a metrica oficial (mAP) usa o score.
+    In parallel, the score head learns via cross-entropy which mode was the
+    winner. Without this term the model would have K trajectories but no
+    notion of which is the most likely -- and the official metric (mAP) uses
+    the score.
 
-    NOTA SOBRE cls_weight: os dois termos vivem em escalas MUITO diferentes.
-    A regressao e MSE em m^2 (dezenas a centenas); a cross-entropy com 6
-    classes parte de ln(6) ~= 1.79. Com cls_weight=1.0 a classificacao vale
-    ~1% da loss total e o gradiente da score_head fica afogado -- foi
-    exatamente o que aconteceu na primeira rodada.
+    NOTE ON cls_weight: the two terms live on VERY different scales. The
+    regression is MSE in m^2 (tens to hundreds); the cross-entropy with 6
+    classes starts at ln(6) ~= 1.79. With cls_weight=1.0 the classification
+    is worth ~1% of the total loss and the score_head's gradient gets
+    drowned out -- which is exactly what happened in the first run.
 
-    Retorna um dicionario para nao multiplicar o numero de retornos a cada
-    diagnostico novo.
+    Returns a dictionary so as not to multiply the number of return values
+    with each new diagnostic.
     """
     per_mode = masked_mse_per_mode(outputs, targets, mask)   # [B, K]
 
-    # argmin nao propaga gradiente (e um indice) -- o gradiente flui apenas
-    # pelo valor selecionado via gather.
+    # argmin does not propagate gradient (it's an index) -- the gradient
+    # flows only through the selected value via gather.
     best_idx = per_mode.argmin(dim=1)                        # [B]
     reg = per_mode.gather(1, best_idx.unsqueeze(1)).squeeze(1)
 
@@ -96,29 +98,29 @@ def wta_loss(outputs, scores, targets, mask, cls_weight):
 
     total = reg + cls_weight * cls
 
-    # --- Diagnosticos (nao entram na loss) ---
+    # --- Diagnostics (do not enter the loss) ---
     with torch.no_grad():
         top1_idx = scores.argmax(dim=1)
         top1 = per_mode.gather(1, top1_idx.unsqueeze(1)).squeeze(1)
 
-        # Erro medio dos K modos = o que se obteria escolhendo ao acaso.
-        # Se top1 ~= mean_all, a cabeca de score nao aprendeu nada.
-        # Se top1 > mean_all, ela aprendeu algo INVERTIDO (indicio de bug).
+        # Mean error of the K modes = what you would get by choosing at random.
+        # If top1 ~= mean_all, the score head learned nothing.
+        # If top1 > mean_all, it learned something INVERTED (sign of a bug).
         mean_all = per_mode.mean(dim=1)
 
-        # Posicao do modo escolhido no ranking real de qualidade.
-        # 0 = escolheu o melhor dos 6; 5 = escolheu o pior.
-        # Acaso puro daria media 2.5.
+        # Position of the chosen mode in the real quality ranking.
+        # 0 = picked the best of the 6; 5 = picked the worst.
+        # Pure chance would give a mean of 2.5.
         rank = (per_mode < top1.unsqueeze(1)).sum(dim=1).float()
 
     return {
-        "total": total,        # [B] o que se otimiza
-        "reg": reg,            # [B] erro do melhor modo (proxy de minADE)
-        "cls": cls,            # [B] cross-entropy pura, sem peso
-        "top1": top1,          # [B] erro do modo mais bem pontuado
-        "mean_all": mean_all,  # [B] erro medio dos modos (baseline do acaso)
-        "rank": rank,          # [B] posicao do escolhido no ranking real
-        "best_idx": best_idx,  # [B] qual modo venceu (diagnostico de colapso)
+        "total": total,        # [B] what gets optimized
+        "reg": reg,            # [B] error of the best mode (proxy for minADE)
+        "cls": cls,            # [B] pure cross-entropy, unweighted
+        "top1": top1,          # [B] error of the best-scored mode
+        "mean_all": mean_all,  # [B] mean error of the modes (chance baseline)
+        "rank": rank,          # [B] position of the chosen mode in the real ranking
+        "best_idx": best_idx,  # [B] which mode won (collapse diagnostic)
     }
 
 
@@ -130,28 +132,28 @@ def train(cls_weight):
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     print("=" * 78)
-    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (sem GPU detectada)"
-    print(f"[*] TREINO MULTIMODAL (K={NUM_MODES}, cls_weight={cls_weight}) NA GPU: {gpu_name}")
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (no GPU detected)"
+    print(f"[*] MULTIMODAL TRAINING (K={NUM_MODES}, cls_weight={cls_weight}) ON GPU: {gpu_name}")
     print("=" * 78)
 
     try:
         train_dataset = WaymoMotionDataset(TRAIN_CACHE)
         val_dataset = WaymoMotionDataset(VAL_CACHE)
     except Exception as e:
-        print(f"[ERRO] Falha ao carregar dataset: {e}")
+        print(f"[ERROR] Failed to load dataset: {e}")
         return
 
     if len(train_dataset) == 0:
-        print(f"[ERRO] Cache de treino vazio: {TRAIN_CACHE}")
+        print(f"[ERROR] Empty training cache: {TRAIN_CACHE}")
         return
     if len(val_dataset) == 0:
-        print(f"[ERRO] Cache de validacao vazio: {VAL_CACHE}")
-        print("       Rode antes, no container de METRICAS:")
+        print(f"[ERROR] Empty validation cache: {VAL_CACHE}")
+        print("       Run first, in the METRICS container:")
         print("       python3 -m src.core.waymo_preprocessor --split validation --shards 0,1,2")
         return
 
-    print(f"[OK] Treino (split oficial 'training'):      {len(train_dataset)} exemplos")
-    print(f"[OK] Validacao (split oficial 'validation'): {len(val_dataset)} exemplos")
+    print(f"[OK] Training (official 'training' split):      {len(train_dataset)} examples")
+    print(f"[OK] Validation (official 'validation' split): {len(val_dataset)} examples")
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
@@ -161,14 +163,14 @@ def train(cls_weight):
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[OK] Modelo multimodal: {n_params:,} parametros")
-    print(f"[OK] Checkpoints em: {checkpoint_dir}")
+    print(f"[OK] Multimodal model: {n_params:,} parameters")
+    print(f"[OK] Checkpoints in: {checkpoint_dir}")
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
     best_val_reg = float("inf")
 
     for epoch in range(EPOCHS):
-        # ---------------- Treino ----------------
+        # ---------------- Training ----------------
         model.train()
         train_loss_sum = 0.0
         train_count = 0
@@ -192,12 +194,12 @@ def train(cls_weight):
 
         avg_train_loss = train_loss_sum / train_count
 
-        # ---------------- Validacao ----------------
+        # ---------------- Validation ----------------
         model.eval()
         sums = {"reg": 0.0, "top1": 0.0, "mean_all": 0.0, "rank": 0.0, "cls": 0.0}
         val_count = 0
-        per_type_stats = {}                      # {tipo: [soma_top1, contagem]}
-        mode_usage = [0] * NUM_MODES             # diagnostico de colapso de modos
+        per_type_stats = {}                      # {type: [top1_sum, count]}
+        mode_usage = [0] * NUM_MODES             # mode-collapse diagnostic
 
         with torch.no_grad():
             for history, future_gt, future_mask, agent_type in val_loader:
@@ -223,9 +225,9 @@ def train(cls_weight):
 
         avg = {k: v / val_count for k, v in sums.items()}
 
-        # Checkpoint por epoca + melhor. O criterio de "melhor" e o erro do
-        # MELHOR modo, porque e o proxy direto do que a metrica oficial
-        # premia -- minADE/minFDE sao best-of-6.
+        # Per-epoch checkpoint + best. The "best" criterion is the error of
+        # the BEST mode, because it's the direct proxy for what the official
+        # metric rewards -- minADE/minFDE are best-of-6.
         torch.save(model.state_dict(),
                    os.path.join(checkpoint_dir, f"multimodal_e{epoch+1}.pth"))
 
@@ -233,57 +235,57 @@ def train(cls_weight):
             best_val_reg = avg["reg"]
             torch.save(model.state_dict(),
                        os.path.join(checkpoint_dir, "multimodal_best.pth"))
-            marker = "  <- melhor ate agora"
+            marker = "  <- best so far"
         else:
             marker = ""
 
         duration = time.time() - start_time
         print(f"[OK] Epoch {epoch+1}/{EPOCHS} | "
               f"Train: {avg_train_loss:.4f} | "
-              f"Val(melhor modo): {avg['reg']:.4f}{marker} | "
+              f"Val(best mode): {avg['reg']:.4f}{marker} | "
               f"Val(top-1): {avg['top1']:.4f} | "
-              f"Tempo: {duration:.2f}s")
+              f"Time: {duration:.2f}s")
 
         breakdown = []
         for t, (loss_sum, n) in sorted(per_type_stats.items()):
-            name = OBJECT_TYPE_NAMES.get(t, f"TIPO_{t}")
+            name = OBJECT_TYPE_NAMES.get(t, f"TYPE_{t}")
             breakdown.append(f"{name}: {loss_sum / n:.2f} (n={n})")
-        print(f"         Val top-1 por tipo -> {' | '.join(breakdown)}")
+        print(f"         Val top-1 by type -> {' | '.join(breakdown)}")
 
-        # --- Qualidade da cabeca de score ---
-        # Se top-1 ~= acaso e rank ~= 2.5, a score_head nao aprendeu nada.
-        # Se top-1 < acaso e rank < 2.5, ela esta ranqueando de verdade.
-        # Se top-1 > acaso e rank > 2.5, aprendeu INVERTIDO -- suspeitar de bug.
+        # --- Score head quality ---
+        # If top-1 ~= chance and rank ~= 2.5, the score_head learned nothing.
+        # If top-1 < chance and rank < 2.5, it is genuinely ranking.
+        # If top-1 > chance and rank > 2.5, it learned INVERTED -- suspect a bug.
         if avg["rank"] < 2.3:
-            verdict = "ranqueando"
+            verdict = "ranking"
         elif avg["rank"] > 2.7:
-            verdict = "INVERTIDO (?)"
+            verdict = "INVERTED (?)"
         else:
-            verdict = "~acaso"
+            verdict = "~chance"
         print(f"         Score head -> top-1: {avg['top1']:.1f} | "
-              f"acaso: {avg['mean_all']:.1f} | "
-              f"rank medio: {avg['rank']:.2f}/5 ({verdict}) | "
+              f"chance: {avg['mean_all']:.1f} | "
+              f"mean rank: {avg['rank']:.2f}/5 ({verdict}) | "
               f"CE: {avg['cls']:.3f}")
 
-        # Se um unico modo vencer quase sempre, o modelo colapsou para um
-        # unimodal disfarcado -- e o experimento perde o sentido.
+        # If a single mode wins almost always, the model collapsed into a
+        # disguised unimodal one -- and the experiment loses its point.
         usage_pct = [100.0 * c / val_count for c in mode_usage]
         usage_str = " | ".join(f"m{i}: {p:.0f}%" for i, p in enumerate(usage_pct))
-        print(f"         Uso dos modos -> {usage_str}")
+        print(f"         Mode usage -> {usage_str}")
         if max(usage_pct) > 90.0:
-            print("         [AVISO] colapso de modos: um modo venceu >90% das vezes.")
+            print("         [WARNING] mode collapse: one mode won >90% of the time.")
 
-    print(f"\n[SUCESSO] Treinamento multimodal finalizado (cls_weight={cls_weight}).")
-    print(f"Melhor checkpoint: multimodal_best.pth (Val melhor modo: {best_val_reg:.4f})")
-    print(f"Salvo em: {checkpoint_dir}")
+    print(f"\n[SUCCESS] Multimodal training finished (cls_weight={cls_weight}).")
+    print(f"Best checkpoint: multimodal_best.pth (Val best mode: {best_val_reg:.4f})")
+    print(f"Saved at: {checkpoint_dir}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Treina o modelo multimodal K=6 com loss Winner-Takes-All"
+        description="Trains the multimodal K=6 model with Winner-Takes-All loss"
     )
     parser.add_argument("--cls-weight", type=float, default=50.0,
-                        help="peso do termo de classificacao na loss total")
+                        help="weight of the classification term in the total loss")
     args = parser.parse_args()
 
     train(cls_weight=args.cls_weight)
