@@ -19,7 +19,7 @@ OBJECT_TYPE_NAMES = {
 }
 
 NUM_MODES = 6          # matches max_predictions=6 from the official config
-EPOCHS = 100           # ceiling only; early stopping ends training before this
+EPOCHS = 300           # ceiling only; early stopping ends training before this
 PATIENCE = 10          # stop if Val(best mode) does not improve for this many epochs
 BATCH_SIZE = 64
 LR = 1e-3
