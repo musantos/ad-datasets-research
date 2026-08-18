@@ -19,7 +19,8 @@ OBJECT_TYPE_NAMES = {
 }
 
 NUM_MODES = 6          # matches max_predictions=6 from the official config
-EPOCHS = 25
+EPOCHS = 100           # ceiling only; early stopping ends training before this
+PATIENCE = 10          # stop if Val(best mode) does not improve for this many epochs
 BATCH_SIZE = 64
 LR = 1e-3
 
@@ -168,6 +169,7 @@ def train(cls_weight):
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
     best_val_reg = float("inf")
+    epochs_no_improve = 0
 
     for epoch in range(EPOCHS):
         # ---------------- Training ----------------
@@ -233,10 +235,12 @@ def train(cls_weight):
 
         if avg["reg"] < best_val_reg:
             best_val_reg = avg["reg"]
+            epochs_no_improve = 0
             torch.save(model.state_dict(),
                        os.path.join(checkpoint_dir, "multimodal_best.pth"))
             marker = "  <- best so far"
         else:
+            epochs_no_improve += 1
             marker = ""
 
         duration = time.time() - start_time
@@ -274,6 +278,16 @@ def train(cls_weight):
         print(f"         Mode usage -> {usage_str}")
         if max(usage_pct) > 90.0:
             print("         [WARNING] mode collapse: one mode won >90% of the time.")
+
+        # Early stopping: once Val(best mode) stops improving for PATIENCE
+        # epochs we have reached the plateau. This is what makes the
+        # architecture comparison fair -- each model is measured AT
+        # CONVERGENCE, not at a fixed 25-epoch budget that silently favors
+        # whichever one happens to converge faster (the MLP did).
+        if epochs_no_improve >= PATIENCE:
+            print(f"\n[EARLY STOP] No Val(best mode) improvement for {PATIENCE} "
+                  f"epochs. Stopping at epoch {epoch+1}/{EPOCHS}.")
+            break
 
     print(f"\n[SUCCESS] Multimodal training finished (cls_weight={cls_weight}).")
     print(f"Best checkpoint: multimodal_best.pth (Val best mode: {best_val_reg:.4f})")
