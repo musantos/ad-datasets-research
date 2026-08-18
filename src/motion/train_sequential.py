@@ -1,5 +1,6 @@
 import os
 import time
+import csv
 import argparse
 import torch
 import torch.nn.functional as F
@@ -35,6 +36,10 @@ VAL_CACHE = "/workspace/datasets/waymo/cache_val"
 # Root of the checkpoints. The final folder includes the cls_weight used, so
 # that sweep runs don't overwrite each other.
 CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
+
+# Root of the per-epoch training logs (one CSV per run, named by
+# model + cls_weight + timestamp so runs/seeds never overwrite each other).
+LOG_ROOT = "/workspace/experiments/logs"
 
 
 def masked_mse_per_mode(outputs, targets, mask):
@@ -169,7 +174,28 @@ def train(cls_weight):
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
     best_val_reg = float("inf")
+    best_epoch = 0
     epochs_no_improve = 0
+
+    # --- Per-epoch CSV log (in addition to the terminal display) ---
+    # One file per run: <model>_<tag>_<timestamp>.csv. The timestamp keeps
+    # re-trains and seeds from overwriting each other. cum_time_s on the last
+    # is_best=1 row is the "time until the best epoch".
+    os.makedirs(LOG_ROOT, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = os.path.join(LOG_ROOT, f"sequential_{tag}_{stamp}.csv")
+    log_file = open(log_path, "w", newline="")
+    log_file.write(f"# model=sequential,cls_weight={cls_weight},checkpoint_dir={checkpoint_dir}\n")
+    log_writer = csv.writer(log_file)
+    log_writer.writerow([
+        "epoch", "train_loss", "val_best_mode", "val_top1", "val_chance",
+        "val_rank", "val_ce", "epoch_time_s", "cum_time_s",
+        "is_best", "best_epoch", "epochs_no_improve",
+    ])
+    print(f"[OK] Per-epoch log: {log_path}")
+
+    train_start = time.time()
+    best_cum_time = 0.0
 
     for epoch in range(EPOCHS):
         # ---------------- Training ----------------
@@ -235,15 +261,21 @@ def train(cls_weight):
 
         if avg["reg"] < best_val_reg:
             best_val_reg = avg["reg"]
+            best_epoch = epoch + 1
             epochs_no_improve = 0
             torch.save(model.state_dict(),
                        os.path.join(checkpoint_dir, "sequential_best.pth"))
             marker = "  <- best so far"
+            is_best = 1
         else:
             epochs_no_improve += 1
             marker = ""
+            is_best = 0
 
         duration = time.time() - start_time
+        cum_time = time.time() - train_start
+        if is_best:
+            best_cum_time = cum_time
         print(f"[OK] Epoch {epoch+1}/{EPOCHS} | "
               f"Train: {avg_train_loss:.4f} | "
               f"Val(best mode): {avg['reg']:.4f}{marker} | "
@@ -279,6 +311,25 @@ def train(cls_weight):
         if max(usage_pct) > 90.0:
             print("         [WARNING] mode collapse: one mode won >90% of the time.")
 
+        # Persist this epoch's diagnostics to the CSV (the terminal display
+        # above is unchanged). Written and flushed per epoch so the log
+        # survives a crash or a manual interrupt mid-training.
+        log_writer.writerow([
+            epoch + 1,
+            f"{avg_train_loss:.6f}",
+            f"{avg['reg']:.6f}",
+            f"{avg['top1']:.6f}",
+            f"{avg['mean_all']:.6f}",
+            f"{avg['rank']:.6f}",
+            f"{avg['cls']:.6f}",
+            f"{duration:.2f}",
+            f"{cum_time:.2f}",
+            is_best,
+            best_epoch,
+            epochs_no_improve,
+        ])
+        log_file.flush()
+
         # Early stopping: once Val(best mode) stops improving for PATIENCE
         # epochs we have reached the plateau. This is what makes the
         # architecture comparison fair -- each model is measured AT
@@ -289,9 +340,14 @@ def train(cls_weight):
                   f"epochs. Stopping at epoch {epoch+1}/{EPOCHS}.")
             break
 
+    log_file.close()
+
+    total_time = time.time() - train_start
     print(f"\n[SUCCESS] Sequential training finished (cls_weight={cls_weight}).")
-    print(f"Best checkpoint: sequential_best.pth (Val best mode: {best_val_reg:.4f})")
+    print(f"Best checkpoint: sequential_best.pth (epoch {best_epoch}, Val best mode: {best_val_reg:.4f})")
+    print(f"Time to best epoch: {best_cum_time:.1f}s | Total training time: {total_time:.1f}s")
     print(f"Saved at: {checkpoint_dir}")
+    print(f"Per-epoch log: {log_path}")
 
 
 if __name__ == "__main__":
