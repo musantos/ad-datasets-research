@@ -67,7 +67,17 @@ def preprocess_scenario(scenario):
     origin_y = sdc_state.center_y
     angle = sdc_state.heading
 
-    c, s = np.cos(-angle), np.sin(-angle)
+    # State arrays are row-vectors [N, 2], so a point p transforms as `p @ R`,
+    # which applies R^T to p. To express world vectors in the SDC frame at
+    # frame 10 the point must be rotated by -angle_SDC; for the row-vector
+    # convention that means R itself must be R(+angle) so that R^T = R(-angle).
+    # This keeps xy_rot / vel_rot in the SAME frame as heading_rel (= headings
+    # - angle, below). The previous version built R(-angle) directly, which
+    # under `p @ R` rotated positions/velocity by +angle instead -- leaving
+    # heading offset from xy/vel by 2*angle_SDC. Harmless while only x,y were
+    # used (Part A), but wrong the moment heading is co-used (item 4).
+    #   R(+angle) = [[cos, -sin], [sin, cos]]
+    c, s = np.cos(angle), np.sin(angle)
     rotation_matrix = np.array([[c, -s], [s, c]])
 
     target_indices = {req.track_index for req in scenario.tracks_to_predict}

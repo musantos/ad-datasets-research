@@ -22,20 +22,29 @@ class MultimodalTrajectoryPredictor(nn.Module):
     is the multimodality, so that any difference in the metrics is
     attributable to it.
 
+    ITEM 4 -- rich input: the per-frame feature count is now a constructor
+    argument (n_features), NOT hard-coded to 2. Read it off the dataset
+    (`dataset.n_features`) and pass it in; the flatten input_dim becomes
+    input_steps * n_features. n_features=2 reproduces the x,y-only baseline.
+
     Shapes:
-        input:   [batch, 11, 2]
+        input:   [batch, 11, n_features]
         outputs: trajectories [batch, K, 80, 2]
                  scores       [batch, K]   (LOGITS, not probabilities)
     """
 
-    def __init__(self, input_steps=11, output_steps=80, num_modes=6, hidden_dim=256):
+    def __init__(self, input_steps=11, output_steps=80, num_modes=6,
+                 hidden_dim=256, n_features=2):
         super(MultimodalTrajectoryPredictor, self).__init__()
 
         self.input_steps = input_steps
         self.output_steps = output_steps
         self.num_modes = num_modes
+        self.n_features = n_features
 
-        self.input_dim = input_steps * 2  # 11 frames * (x,y) = 22
+        # Per-frame feature dimension is a knob now: 2 for x,y (baseline),
+        # 6 for (x, y, heading->sin/cos, vx, vy) in item 4, etc.
+        self.input_dim = input_steps * n_features  # 11 * n_features
 
         # Backbone shared between the two heads.
         self.backbone = nn.Sequential(
@@ -55,10 +64,11 @@ class MultimodalTrajectoryPredictor(nn.Module):
         self.score_head = nn.Linear(hidden_dim, num_modes)
 
     def forward(self, x):
-        # x arrives as [batch, 11, 2]
+        # x arrives as [batch, 11, n_features]
         batch_size = x.shape[0]
 
-        # Flatten to [batch, 22] -- same logic as the baseline.
+        # Flatten to [batch, 11 * n_features] -- same logic as the baseline,
+        # the trailing feature dim just grew.
         x = x.view(batch_size, -1)
 
         features = self.backbone(x)
@@ -74,11 +84,13 @@ class MultimodalTrajectoryPredictor(nn.Module):
 
 
 if __name__ == "__main__":
-    model = MultimodalTrajectoryPredictor()
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"OK: Multimodal model loaded ({n_params:,} parameters).")
+    for nf in (2, 6):
+        model = MultimodalTrajectoryPredictor(n_features=nf)
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"OK: Multimodal model loaded, n_features={nf} "
+              f"({n_params:,} parameters).")
 
-    test_input = torch.randn(2, 11, 2)
-    traj, scores = model(test_input)
-    print(f"Trajectories shape: {traj.shape}")   # expected: [2, 6, 80, 2]
-    print(f"Scores shape:       {scores.shape}")  # expected: [2, 6]
+        test_input = torch.randn(2, 11, nf)
+        traj, scores = model(test_input)
+        print(f"   Trajectories shape: {tuple(traj.shape)}")   # [2, 6, 80, 2]
+        print(f"   Scores shape:       {tuple(scores.shape)}")  # [2, 6]

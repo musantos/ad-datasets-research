@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from src.core.waymo_pytorch_dataset import WaymoMotionDataset
+from src.core.waymo_pytorch_dataset_agentcentric import WaymoMotionDatasetAgentCentric
 from src.motion.sequential_model import SequentialTrajectoryPredictor
 
 # Mapping of the Object.Type enum from the Waymo proto (same as the baseline).
@@ -28,6 +28,12 @@ PATIENCE = 10          # stop if Val(best mode) does not improve for this many e
 BATCH_SIZE = 64
 LR = 1e-3
 
+# ITEM 4 -- rich input, FIXED across both grid arms so the ONLY difference
+# between {SDC-centric, agent-centric} is the normalization, not the input
+# richness. heading expands to (sin, cos) inside the dataset, so this is 6
+# channels; n_features is read off the dataset, never hard-coded.
+FEATURES = ("x", "y", "heading", "vx", "vy")
+
 # OFFICIAL WAYMO SPLIT -- there is no random_split.
 # Training and validation come from DIFFERENT shards of DIFFERENT splits, so
 # there is no possibility of leakage: they are distinct scenarios. This also
@@ -36,12 +42,12 @@ LR = 1e-3
 TRAIN_CACHE = "/workspace/datasets/waymo/cache_train"
 VAL_CACHE = "/workspace/datasets/waymo/cache_val"
 
-# Root of the checkpoints. The final folder includes the cls_weight used, so
-# that sweep runs don't overwrite each other.
+# Root of the checkpoints. The final folder includes the cls_weight AND the
+# grid arm (sdc/agent), so sweep runs never overwrite each other.
 CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
 
 # Root of the per-epoch training logs (one CSV per run, named by
-# model + cls_weight + seed + timestamp so runs never overwrite each other).
+# model + cls_weight + arm + seed + timestamp so runs never overwrite).
 LOG_ROOT = "/workspace/experiments/logs"
 
 
@@ -133,32 +139,37 @@ def wta_loss(outputs, scores, targets, mask, cls_weight):
     }
 
 
-def train(cls_weight, seed=None):
+def train(cls_weight, agent_centric, seed=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Reproducibility: when --seed is given, seed every RNG. The seed also
     # goes into the run tag (folder + log name) so multiple seeds coexist
-    # instead of overwriting each other. WITHOUT --seed the paths are
-    # IDENTICAL to before, so existing inference/tooling keeps working.
+    # instead of overwriting each other. WITHOUT --seed the paths keep the
+    # base tag, so tooling stays predictable.
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    tag = f"cls{cls_weight:g}"
+    # Grid arm goes into the tag so {sdc, agent} never share a checkpoint dir.
+    arm = "agent" if agent_centric else "sdc"
+    tag = f"cls{cls_weight:g}_{arm}"
     run_tag = tag if seed is None else f"{tag}_seed{seed}"
     checkpoint_dir = os.path.join(CHECKPOINT_ROOT, f"sequential_{run_tag}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     print("=" * 78)
     gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (no GPU detected)"
-    print(f"[*] SEQUENTIAL (GRU) TRAINING (K={NUM_MODES}, cls_weight={cls_weight}) ON GPU: {gpu_name}")
+    print(f"[*] SEQUENTIAL (GRU) TRAINING (K={NUM_MODES}, cls_weight={cls_weight}, "
+          f"arm={arm}) ON GPU: {gpu_name}")
     print("=" * 78)
 
     try:
-        train_dataset = WaymoMotionDataset(TRAIN_CACHE)
-        val_dataset = WaymoMotionDataset(VAL_CACHE)
+        train_dataset = WaymoMotionDatasetAgentCentric(
+            TRAIN_CACHE, agent_centric=agent_centric, features=FEATURES)
+        val_dataset = WaymoMotionDatasetAgentCentric(
+            VAL_CACHE, agent_centric=agent_centric, features=FEATURES)
     except Exception as e:
         print(f"[ERROR] Failed to load dataset: {e}")
         return
@@ -172,14 +183,16 @@ def train(cls_weight, seed=None):
         print("       python3 -m src.core.waymo_preprocessor --split validation --shards 0,1,2")
         return
 
+    n_features = train_dataset.n_features
     print(f"[OK] Training (official 'training' split):      {len(train_dataset)} examples")
     print(f"[OK] Validation (official 'validation' split): {len(val_dataset)} examples")
+    print(f"[OK] Features {FEATURES} -> n_features={n_features} (agent_centric={agent_centric})")
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
     model = SequentialTrajectoryPredictor(
-        input_steps=11, output_steps=80, num_modes=NUM_MODES
+        input_steps=11, output_steps=80, num_modes=NUM_MODES, n_features=n_features
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -201,7 +214,8 @@ def train(cls_weight, seed=None):
     stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(LOG_ROOT, f"sequential_{run_tag}_{stamp}.csv")
     log_file = open(log_path, "w", newline="")
-    log_file.write(f"# model=sequential,cls_weight={cls_weight},seed={seed},checkpoint_dir={checkpoint_dir}\n")
+    log_file.write(f"# model=sequential,cls_weight={cls_weight},arm={arm},"
+                   f"n_features={n_features},seed={seed},checkpoint_dir={checkpoint_dir}\n")
     log_writer = csv.writer(log_file)
     log_writer.writerow([
         "epoch", "train_loss", "val_best_mode", "val_top1", "val_chance",
@@ -360,7 +374,7 @@ def train(cls_weight, seed=None):
     log_file.close()
 
     total_time = time.time() - train_start
-    print(f"\n[SUCCESS] Sequential training finished (cls_weight={cls_weight}).")
+    print(f"\n[SUCCESS] Sequential training finished (cls_weight={cls_weight}, arm={arm}).")
     print(f"Best checkpoint: sequential_best.pth (epoch {best_epoch}, Val best mode: {best_val_reg:.4f})")
     print(f"Time to best epoch: {best_cum_time:.1f}s | Total training time: {total_time:.1f}s")
     print(f"Saved at: {checkpoint_dir}")
@@ -373,8 +387,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--cls-weight", type=float, default=50.0,
                         help="weight of the classification term in the total loss")
+    parser.add_argument("--agent-centric", action="store_true",
+                        help="agent-centric normalization arm; omit for the SDC-centric arm")
     parser.add_argument("--seed", type=int, default=None,
                         help="RNG seed; also suffixes the run folder/log (..._seed<n>)")
     args = parser.parse_args()
 
-    train(cls_weight=args.cls_weight, seed=args.seed)
+    train(cls_weight=args.cls_weight, agent_centric=args.agent_centric, seed=args.seed)

@@ -7,17 +7,22 @@ class SequentialTrajectoryPredictor(nn.Module):
     Sequential-encoder version of MultimodalTrajectoryPredictor.
 
     Conceptual difference from the multimodal MLP baseline: instead of
-    flattening the 11 history frames into a single 22-dim vector, it reads
-    them AS A SEQUENCE with a GRU. The only thing that changes between the
-    two experiments is how the temporal history is aggregated
+    flattening the 11 history frames into a single vector, it reads them
+    AS A SEQUENCE with a GRU. The only thing that changes between the two
+    experiments is how the temporal history is aggregated
     (flatten -> recurrence); everything downstream is identical.
 
     Kept identical to the MLP on purpose, so any metric difference is
     attributable to the encoder and nothing else:
-        - same input:   [batch, 11, 2]  (SDC-relative x,y -- unchanged)
+        - same input:   [batch, 11, n_features]
         - same outputs: trajectories [batch, K, 80, 2]
                         scores       [batch, K]  (LOGITS, not probabilities)
         - same K=6, same output horizon, same two heads.
+
+    ITEM 4 -- rich input: the per-frame feature count is now a constructor
+    argument (n_features), NOT hard-coded to 2. Read it off the dataset
+    (`dataset.n_features`) and pass it in; it becomes the GRU input_size.
+    n_features=2 reproduces the x,y-only baseline.
 
     Design notes:
         - GRU (not LSTM): 11 steps is a short sequence and the GRU has fewer
@@ -34,13 +39,13 @@ class SequentialTrajectoryPredictor(nn.Module):
           expose it as the knob it is.
 
     Shapes:
-        input:   [batch, 11, 2]
+        input:   [batch, 11, n_features]
         outputs: trajectories [batch, K, 80, 2]
                  scores       [batch, K]
     """
 
     def __init__(self, input_steps=11, output_steps=80, num_modes=6,
-                 hidden_dim=128, gru_layers=1):
+                 hidden_dim=128, gru_layers=1, n_features=2):
         super(SequentialTrajectoryPredictor, self).__init__()
 
         self.input_steps = input_steps
@@ -48,9 +53,9 @@ class SequentialTrajectoryPredictor(nn.Module):
         self.num_modes = num_modes
         self.hidden_dim = hidden_dim
 
-        # Per-frame feature dimension: x,y. (Same 2 features the MLP sees;
-        # richer full_state features are a separate future step.)
-        self.feature_dim = 2
+        # Per-frame feature dimension is a knob now: 2 for x,y (baseline),
+        # 6 for (x, y, heading->sin/cos, vx, vy) in item 4, etc.
+        self.feature_dim = n_features
 
         # Encoder: reads the 11 frames as a sequence.
         self.encoder = nn.GRU(
@@ -70,7 +75,7 @@ class SequentialTrajectoryPredictor(nn.Module):
         self.score_head = nn.Linear(hidden_dim, num_modes)
 
     def forward(self, x):
-        # x arrives as [batch, 11, 2] -- NO flatten, unlike the MLP.
+        # x arrives as [batch, 11, n_features] -- NO flatten, unlike the MLP.
         batch_size = x.shape[0]
 
         # GRU returns (output_seq, h_n). h_n is [num_layers, batch, hidden].
@@ -90,11 +95,13 @@ class SequentialTrajectoryPredictor(nn.Module):
 
 
 if __name__ == "__main__":
-    model = SequentialTrajectoryPredictor()
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"OK: Sequential (GRU) model loaded ({n_params:,} parameters).")
+    for nf in (2, 6):
+        model = SequentialTrajectoryPredictor(n_features=nf)
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"OK: Sequential (GRU) model loaded, n_features={nf} "
+              f"({n_params:,} parameters).")
 
-    test_input = torch.randn(2, 11, 2)
-    traj, scores = model(test_input)
-    print(f"Trajectories shape: {traj.shape}")   # expected: [2, 6, 80, 2]
-    print(f"Scores shape:       {scores.shape}")  # expected: [2, 6]
+        test_input = torch.randn(2, 11, nf)
+        traj, scores = model(test_input)
+        print(f"   Trajectories shape: {tuple(traj.shape)}")   # [2, 6, 80, 2]
+        print(f"   Scores shape:       {tuple(scores.shape)}")  # [2, 6]
