@@ -1,6 +1,6 @@
 # Projeto de Mestrado — Motion Prediction (Waymo Open Dataset)
 ### Documento de contexto
-Última atualização: 18 de agosto de 2026
+Última atualização: 19 de agosto de 2026
 
 > **Nota de leitura.** As seções **1–11** abaixo são o registro **histórico do
 > Milestone 1** (16/jul/2026: baseline MLP *unimodal*, `random_split`, 3 shards).
@@ -90,8 +90,8 @@ sequential cls50 saiu pior que cls1 — cheiro de ruído de rodada). A ordem
 ### 0.6. Próximos passos
 1. ✅ **`--seed`** nos `train_*` **e** `run_inference_*` (semeia
    random/numpy/torch + sufixo `<model>_<tag>_seed<n>` em checkpoints, predições
-   e log). Retrocompatível: sem `--seed`, caminhos idênticos aos de hoje. Falta
-   **rodar** as 3 seeds (comandos em 0.7) e agregar em média ± desvio.
+   e log). Retrocompatível: sem `--seed`, caminhos idênticos aos de hoje.
+   ✅ **5 seeds rodadas e agregadas** (média ± desvio) — resultados em **0.8**.
 2. ✅ **`best_epoch`** registrado na linha final do log + no CSV por época
    (também adicionado neste ciclo: log por época em
    `/workspace/experiments/logs/<model>_<run_tag>_<stamp>.csv`, com `epoch_time_s`,
@@ -161,6 +161,77 @@ done
 Agregação: com as N CSVs por config, reportar **média ± desvio** das métricas
 sobre as seeds (é o que separa ruído de treino de efeito real; sem isso, não
 ranquear `cls` entre si — ver ressalva em 0.4).
+
+### 0.8. Consolidação das seeds *(19/ago/2026)* — fecha a Parte A
+
+Rodadas **5 seeds** por configuração (não 3; 5 dá barra de erro mais confiável),
+lote de treino/inferência de 19/ago. Grade completa: **2 modelos × 4 pesos × 5
+seeds = 40 runs**. **Todos convergiram por early stopping** (`epochs_after_best`
+== `PATIENCE=10` em todos os 40; nenhum parou por teto de épocas). A tabela 0.3
+acima (lote single-seed 18/ago) fica como **registro histórico**; a leitura
+válida com variância é a de baixo.
+
+**Métricas oficiais — overall (média das 9 breakdowns), média ± desvio das 5 seeds:**
+
+| modelo | cls | minADE | minFDE | MissRate | mAP |
+|--------|-----|--------|--------|----------|-----|
+| flatten    | 1   | 3.572 ± 0.128 | 6.581 ± 0.230 | 0.881 ± 0.010 | 0.024 ± 0.016 |
+| flatten    | 20  | 3.481 ± 0.141 | 6.380 ± 0.149 | 0.878 ± 0.012 | 0.020 ± 0.011 |
+| flatten    | 50  | 3.538 ± 0.116 | 6.552 ± 0.152 | 0.889 ± 0.015 | 0.020 ± 0.013 |
+| flatten    | 100 | 3.519 ± 0.082 | 6.368 ± 0.106 | 0.880 ± 0.013 | 0.023 ± 0.009 |
+| sequential | 1   | 4.742 ± 0.371 | 8.724 ± 0.518 | 0.947 ± 0.009 | 0.008 ± 0.003 |
+| sequential | 20  | 4.502 ± 0.370 | 8.381 ± 0.550 | 0.948 ± 0.007 | 0.016 ± 0.008 |
+| sequential | 50  | 4.442 ± 0.129 | 8.259 ± 0.264 | 0.945 ± 0.006 | 0.006 ± 0.002 |
+| sequential | 100 | 4.415 ± 0.155 | 8.144 ± 0.164 | 0.944 ± 0.010 | 0.013 ± 0.008 |
+
+**Veredicto 1 — flatten > sequential é robusto.** O gap entre modelos (~0.9–1.2
+em minADE, ~1.7–2.1 em minFDE) é **várias vezes maior que o desvio entre seeds**
+(~0.08–0.37). Pela regra "diferença menor que a barra = ruído", a ordem é efeito
+real. Isto **promove o resultado do M1/seção 0.3** de single-seed para
+estatisticamente sustentado.
+
+**Veredicto 2 — `cls_weight` é indistinguível de ruído (resolve a ressalva de
+0.4).** Dentro de cada modelo, as 4 configs de peso **se sobrepõem dentro do
+desvio** em todas as métricas (ex.: flatten minADE varia 3.481→3.538 com desvios
+~0.12–0.14). A ressalva "sem seeds, não ranquear `cls`" agora tem veredicto:
+**não há ranking detectável entre pesos** neste regime — é empate dentro da barra
+de erro, não uma ordem. `mAP` é ruidoso demais para ordenar (desvio
+frequentemente ~ metade da média); não usar como critério de desempate aqui.
+
+**Veredicto 3 — custo assimétrico (trade-off da seção 0.4, agora quantificado):**
+
+| modelo | tempo total médio (s) | épocas até convergir | s/época |
+|--------|----------------------|---------------------|---------|
+| flatten    | 127.1 | 52.0  | 2.05 |
+| sequential | 342.5 | 167.2 | 1.94 |
+
+O GRU **não é mais lento por época** (~2 s nos dois); ele precisa de **~3.2× mais
+épocas** para convergir e termina **pior**. Custo/benefício condenatório
+(~2.7× wall-clock por métricas piores) — reforça a hipótese que arma o item 4:
+recorrência sozinha não paga o próprio custo. As 40 rodadas somaram ~2.6 h.
+
+**Veredicto 4 — GPU subutilizada (dado de infra p/ planejar a Fase 2).** RTX 5060
+Ti 16 GB: utilização **mediana 4%** (pico 44%), memória **~1.3 GB de 16 GB**,
+potência ~28 W, processo Python ~240 MiB. Os experimentos **não são GPU-bound** —
+o limitador é o pipeline de dados (dataload/CPU), não o compute. Implica:
+(a) folga enorme de VRAM/compute para o modelo vetorizado + mapa/social (Fase 2);
+(b) mais seeds / batch maior são ~grátis em GPU; (c) se o tempo incomodar, o alvo
+de otimização é o I/O de dados, não a placa.
+
+**Decisão para o item 4:** como nenhum `cls_weight` se distingue, **não há config
+"vencedora" a carregar**. Fixar um peso razoável (cls20 teve o menor minADE médio
+no flatten — serve de default) e concentrar a variável experimental do item 4
+(SDC-cêntrico × agente-cêntrico + estado rico). Isso **encolhe a grade** (dispensa
+varrer `cls` de novo).
+
+**Contexto de dados (relevante daqui pra frente):** os treinos atuais usam um
+**subconjunto** cacheado, não os 2,1 TB. Pipeline: full dataset em **HDD (cold
+storage)** → script copia tfrecords para **SSD SATA 1 TB** (throughput) → cache
+`.npy` lido no treino. Os ~2 s/época confirmam subconjunto pequeno. "Usar mais
+dados" só vira alavanca real **depois** da mudança arquitetural (item 4 → Fase 2),
+que é o que dá capacidade/entrada para explorá-los; antes disso, mais dados
+esbarram no teto de entrada pobre (`[B,11,2]`, sem mapa/social). *(Nº exato de
+tfrecords em uso: a confirmar.)*
 
 ---
 

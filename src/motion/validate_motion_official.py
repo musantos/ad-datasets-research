@@ -1,5 +1,6 @@
 import os
 import csv
+import shutil
 import argparse
 import datetime
 import numpy as np
@@ -221,7 +222,7 @@ def write_metrics_csv(csv_path, pred_dir, kind, metric_names,
     print(f"INFO: metrics written to {csv_path}")
 
 
-def run_validation(pred_dir, csv_path=None):
+def run_validation(pred_dir, csv_path=None, cleanup=False):
     config = build_config()
     metric_names = config_util.get_breakdown_names_from_motion_config(config)
 
@@ -337,6 +338,21 @@ def run_validation(pred_dir, csv_path=None):
                       min_ade, min_fde, miss_rate, overlap_rate,
                       mean_average_precision)
 
+    # Opt-in cleanup. Predictions are a disposable intermediate: they exist
+    # only so this script can extract the CSV. Once the metrics are written,
+    # the ~1100 per-scenario .npy of THIS run are safe to remove -- and doing
+    # so here prevents the pile-up (40 runs x ~1100 files ~= 44k inodes).
+    # Guards: only runs after a successful write above; deletes EXACTLY the
+    # evaluated --pred-dir, never the cache. Never enable this blindly in a
+    # loop without trusting the CSV was written.
+    if cleanup:
+        if not os.path.exists(csv_path):
+            print(f"WARNING: --cleanup requested but CSV missing ({csv_path}); "
+                  f"keeping predictions.")
+        else:
+            shutil.rmtree(pred_dir)
+            print(f"INFO: --cleanup removed predictions folder: {pred_dir}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -346,6 +362,10 @@ if __name__ == "__main__":
                         help="folder with the predictions to evaluate")
     parser.add_argument("--csv", default=None,
                         help="output CSV path (default: results/metrics_<tag>_<date>.csv)")
+    parser.add_argument("--cleanup", action="store_true",
+                        help="after writing the CSV, delete the evaluated --pred-dir "
+                             "(predictions are a disposable intermediate; prevents the "
+                             "44k-inode pile-up). Off by default.")
     args = parser.parse_args()
 
-    run_validation(pred_dir=args.pred_dir, csv_path=args.csv)
+    run_validation(pred_dir=args.pred_dir, csv_path=args.csv, cleanup=args.cleanup)

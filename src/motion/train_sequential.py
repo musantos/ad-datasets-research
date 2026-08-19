@@ -269,12 +269,13 @@ def train(cls_weight, seed=None):
 
         avg = {k: v / val_count for k, v in sums.items()}
 
-        # Per-epoch checkpoint + best. The "best" criterion is the error of
-        # the BEST mode, because it's the direct proxy for what the official
-        # metric rewards -- minADE/minFDE are best-of-6.
-        torch.save(model.state_dict(),
-                   os.path.join(checkpoint_dir, f"sequential_e{epoch+1}.pth"))
-
+        # Best-only checkpoint. The "best" criterion is the error of the
+        # BEST mode, the direct proxy for what the official metric rewards
+        # (minADE/minFDE are best-of-6). We persist ONLY when the epoch
+        # improves it, overwriting a single sequential_best.pth. The old
+        # per-epoch save (one .pth per epoch) was never read by anything and
+        # cost ~4.6 G across the sweep -- and every best is reproducible in
+        # ~2 min/run anyway.
         if avg["reg"] < best_val_reg:
             best_val_reg = avg["reg"]
             best_epoch = epoch + 1
