@@ -88,11 +88,14 @@ sequential cls50 saiu pior que cls1 — cheiro de ruído de rodada). A ordem
   Registrar como custo: tempo/época, nº de épocas até early stop, nº de params.
 
 ### 0.6. Próximos passos
-1. **`--seed`** nos `train_*` (semear torch/numpy + pôr no nome da pasta
-   `<model>_<tag>_seed<n>`) para 3 seeds coexistirem em vez de se sobrescreverem;
-   rodadas do zero, já com early stopping.
-2. **Registrar `best_epoch`** (época do último best antes de estourar a paciência)
-   na linha final do log.
+1. ✅ **`--seed`** nos `train_*` **e** `run_inference_*` (semeia
+   random/numpy/torch + sufixo `<model>_<tag>_seed<n>` em checkpoints, predições
+   e log). Retrocompatível: sem `--seed`, caminhos idênticos aos de hoje. Falta
+   **rodar** as 3 seeds (comandos em 0.7) e agregar em média ± desvio.
+2. ✅ **`best_epoch`** registrado na linha final do log + no CSV por época
+   (também adicionado neste ciclo: log por época em
+   `/workspace/experiments/logs/<model>_<run_tag>_<stamp>.csv`, com `epoch_time_s`,
+   `cum_time_s`, `is_best` → tempo-até-best = `cum_time_s` da última linha `is_best=1`).
 3. **Degrau seguinte:** normalização **agente-cêntrica** + `full_state`
    (velocidade/heading). Mora em `src/core` (preprocessor + `WaymoMotionDataset`).
    O `full_state` no cache já tem `heading, vx, vy` → dá para re-centrar/rotacionar
@@ -100,6 +103,9 @@ sequential cls50 saiu pior que cls1 — cheiro de ruído de rodada). A ordem
    `{flatten, encoder} × {SDC, agente-cêntrica}` + input enriquecido.
 
 ### 0.7. Comandos atuais (substituem os da seção 10 para este ciclo)
+
+**Rodada única (sem seed) — comportamento de hoje.** Caminhos sem sufixo
+(`multimodal_cls50`, etc.); é o que gerou o lote `2026-08-18_12-38-00`.
 ```bash
 # ===== CONTÊINER DE TREINO (GPU) — treina + infere, 2 modelos × 4 pesos =====
 for t in 1 20 50 100; do
@@ -120,6 +126,41 @@ for m in multimodal sequential; do
   done
 done
 ```
+
+**Multi-seed (Fase 0 de hygiene) — 3 rodadas por configuração.** O `--seed`
+sufixa `_seed<n>` na pasta de checkpoints, nas predições e no log por época
+(`<model>_cls<t>_seed<s>`), então as seeds coexistem em vez de se sobrescrever.
+Treino e inferência precisam do **mesmo** `--seed`; as métricas apontam para a
+pasta sufixada no `--pred-dir`. Ajustar `SEEDS` conforme quantas rodadas.
+```bash
+SEEDS="0 1 2"
+
+# ===== CONTÊINER DE TREINO (GPU) — 2 modelos × 4 pesos × N seeds =====
+for s in $SEEDS; do
+  for t in 1 20 50 100; do
+    python3 -m src.motion.train_multimodal         --cls-weight $t --seed $s
+    python3 -m src.motion.run_inference_multimodal --tag cls$t     --seed $s
+    python3 -m src.motion.train_sequential         --cls-weight $t --seed $s
+    python3 -m src.motion.run_inference_sequential --tag cls$t     --seed $s
+  done
+done
+
+# ===== CONTÊINER DE MÉTRICAS (CPU, TF 2.11) =====
+mkdir -p results
+STAMP=$(date +%Y-%m-%d_%H-%M-%S)          # 1 carimbo p/ o lote inteiro
+for s in $SEEDS; do
+  for m in multimodal sequential; do
+    for t in cls1 cls20 cls50 cls100; do
+      python3 -m src.motion.validate_motion_official \
+          --pred-dir /workspace/datasets/waymo/predictions/${m}_${t}_seed${s} \
+          --csv results/metrics_${m}_${t}_seed${s}_${STAMP}.csv
+    done
+  done
+done
+```
+Agregação: com as N CSVs por config, reportar **média ± desvio** das métricas
+sobre as seeds (é o que separa ruído de treino de efeito real; sem isso, não
+ranquear `cls` entre si — ver ressalva em 0.4).
 
 ---
 
