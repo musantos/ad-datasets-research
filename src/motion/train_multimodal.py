@@ -1,7 +1,10 @@
 import os
 import time
 import csv
+import random
 import argparse
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -38,7 +41,7 @@ VAL_CACHE = "/workspace/datasets/waymo/cache_val"
 CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
 
 # Root of the per-epoch training logs (one CSV per run, named by
-# model + cls_weight + timestamp so runs/seeds never overwrite each other).
+# model + cls_weight + seed + timestamp so runs never overwrite each other).
 LOG_ROOT = "/workspace/experiments/logs"
 
 
@@ -130,11 +133,22 @@ def wta_loss(outputs, scores, targets, mask, cls_weight):
     }
 
 
-def train(cls_weight):
+def train(cls_weight, seed=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Reproducibility: when --seed is given, seed every RNG. The seed also
+    # goes into the run tag (folder + log name) so multiple seeds coexist
+    # instead of overwriting each other. WITHOUT --seed the paths are
+    # IDENTICAL to before, so existing inference/tooling keeps working.
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
     tag = f"cls{cls_weight:g}"
-    checkpoint_dir = os.path.join(CHECKPOINT_ROOT, f"multimodal_{tag}")
+    run_tag = tag if seed is None else f"{tag}_seed{seed}"
+    checkpoint_dir = os.path.join(CHECKPOINT_ROOT, f"multimodal_{run_tag}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     print("=" * 78)
@@ -171,6 +185,8 @@ def train(cls_weight):
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[OK] Multimodal model: {n_params:,} parameters")
     print(f"[OK] Checkpoints in: {checkpoint_dir}")
+    if seed is not None:
+        print(f"[OK] Seed: {seed}")
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
     best_val_reg = float("inf")
@@ -178,14 +194,14 @@ def train(cls_weight):
     epochs_no_improve = 0
 
     # --- Per-epoch CSV log (in addition to the terminal display) ---
-    # One file per run: <model>_<tag>_<timestamp>.csv. The timestamp keeps
-    # re-trains and seeds from overwriting each other. cum_time_s on the last
+    # One file per run: <model>_<run_tag>_<timestamp>.csv. The timestamp
+    # keeps re-trains from overwriting each other. cum_time_s on the last
     # is_best=1 row is the "time until the best epoch".
     os.makedirs(LOG_ROOT, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join(LOG_ROOT, f"multimodal_{tag}_{stamp}.csv")
+    log_path = os.path.join(LOG_ROOT, f"multimodal_{run_tag}_{stamp}.csv")
     log_file = open(log_path, "w", newline="")
-    log_file.write(f"# model=multimodal,cls_weight={cls_weight},checkpoint_dir={checkpoint_dir}\n")
+    log_file.write(f"# model=multimodal,cls_weight={cls_weight},seed={seed},checkpoint_dir={checkpoint_dir}\n")
     log_writer = csv.writer(log_file)
     log_writer.writerow([
         "epoch", "train_loss", "val_best_mode", "val_top1", "val_chance",
@@ -356,6 +372,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--cls-weight", type=float, default=50.0,
                         help="weight of the classification term in the total loss")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="RNG seed; also suffixes the run folder/log (..._seed<n>)")
     args = parser.parse_args()
 
-    train(cls_weight=args.cls_weight)
+    train(cls_weight=args.cls_weight, seed=args.seed)
