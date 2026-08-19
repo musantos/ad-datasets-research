@@ -18,16 +18,20 @@ CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
 PRED_ROOT = "/workspace/datasets/waymo/predictions"
 
 
-def run_inference(tag):
+def run_inference(tag, seed=None):
     """
-    tag: identifies the experiment, e.g. 'cls20'.
-         Checkpoint: experiments/checkpoints/sequential_<tag>/sequential_best.pth
-         Output:     datasets/waymo/predictions/sequential_<tag>/
+    tag:  identifies the experiment, e.g. 'cls20'.
+    seed: optional; when given, reads/writes the seeded run folder
+          (<model>_<tag>_seed<n>), matching train_*.py. Without it the
+          paths are IDENTICAL to before.
+         Checkpoint: experiments/checkpoints/sequential_<run_tag>/sequential_best.pth
+         Output:     datasets/waymo/predictions/sequential_<run_tag>/
     """
+    run_tag = tag if seed is None else f"{tag}_seed{seed}"
     checkpoint_path = os.path.join(
-        CHECKPOINT_ROOT, f"sequential_{tag}", "sequential_best.pth"
+        CHECKPOINT_ROOT, f"sequential_{run_tag}", "sequential_best.pth"
     )
-    pred_dir = os.path.join(PRED_ROOT, f"sequential_{tag}")
+    pred_dir = os.path.join(PRED_ROOT, f"sequential_{run_tag}")
 
     if not os.path.exists(checkpoint_path):
         print(f"[ERROR] Checkpoint not found: {checkpoint_path}")
@@ -111,6 +115,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--tag", required=True,
                         help="experiment identifier, e.g. cls1, cls20, cls50, cls100")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="RNG seed used at training; selects the run folder (..._seed<n>)")
     args = parser.parse_args()
 
-    run_inference(tag=args.tag)
+    run_inference(tag=args.tag, seed=args.seed)
