@@ -1,6 +1,6 @@
 # Projeto de Mestrado — Motion Prediction (Waymo Open Dataset)
 ### Documento de contexto
-Última atualização: 19 de agosto de 2026
+Última atualização: 20 de agosto de 2026
 
 > **Nota de leitura.** As seções **1–11** abaixo são o registro **histórico do
 > Milestone 1** (16/jul/2026: baseline MLP *unimodal*, `random_split`, 3 shards).
@@ -232,6 +232,97 @@ dados" só vira alavanca real **depois** da mudança arquitetural (item 4 → Fa
 que é o que dá capacidade/entrada para explorá-los; antes disso, mais dados
 esbarram no teto de entrada pobre (`[B,11,2]`, sem mapa/social). *(Nº exato de
 tfrecords em uso: a confirmar.)*
+
+---
+
+### 0.9. Item 4 — normalização agente-cêntrica *(20/ago/2026)* — fecha o item 4
+
+Executada a grade do item 4 (**opção C**): `{flatten, sequential} × {SDC,
+agente} × seed 0..7`, **`cls_weight=20` fixo** (herdado da Parte A; ver decisão
+em 0.8). 4 configs × 8 seeds = **32 runs (train+infer)**. **Todas convergiram
+por early stopping** (`epochs_after_best == PATIENCE=10` nas 32; nenhuma parou
+por teto de épocas). Mesmo split/hardware. `cache_train=2972`, `cache_val=879`,
+**volume fixo** (os 4 configs veem exatamente o mesmo dado).
+
+**Importante — o que este experimento isola:** o braço `SDC` **não** é o baseline
+de 2 canais da Parte A. Aqui os **dois** braços usam input rico
+`(x,y,heading,vx,vy)` com heading→sin/cos ⇒ **6 canais**. A única variável é a
+**normalização** (SDC-cêntrico × agente-cêntrico). Predições do braço agente são
+remapeadas ao frame SDC antes de gravar (inversão validada numericamente,
+round-trip 10000/10000 exato).
+
+**Métricas oficiais — overall (média das 9 breakdowns), média ± desvio das 8 seeds:**
+
+| modelo | arm | minADE | minFDE | MissRate | mAP |
+|--------|-----|--------|--------|----------|-----|
+| flatten    | agente | **1.394 ± 0.029** | **3.293 ± 0.060** | **0.576 ± 0.018** | 0.117 ± 0.018 |
+| flatten    | SDC    | 2.068 ± 0.069 | 3.705 ± 0.140 | 0.725 ± 0.035 | 0.055 ± 0.020 |
+| sequential | agente | 1.408 ± 0.032 | 3.360 ± 0.113 | 0.581 ± 0.017 | **0.140 ± 0.023** |
+| sequential | SDC    | 2.252 ± 0.123 | 4.065 ± 0.194 | 0.759 ± 0.020 | 0.056 ± 0.008 |
+
+**Veredicto 1 — H1 confirmada, forte (agente-cêntrico vence).** Teste **pareado
+por seed** (mesma seed nos dois braços): o agente vence SDC em **minADE em 9/9
+breakdowns nos dois modelos, todos p < 0.001**; em MissRate, 9/9 no flatten
+(7/9 significativos). A vantagem em minADE cai de ~0.76 (horizonte curto `_5`)
+para ~0.41 (`_15`) no flatten — grande no curto, encolhe no longo, exatamente a
+assinatura física esperada. O smoke-test de 1 seed se sustenta com IC de 8 seeds.
+
+**Veredicto 2 — H2 resolvida: os flips do smoke-test eram ruído.** Os dois casos
+que invertiam no n=1 (VEHICLE_15, CYCLIST_15 em minFDE) **não são reais** no
+flatten: VEHICLE_15 Δ(SDC−agente)=−0.027 (p=0.71), CYCLIST_15 Δ=−0.085 (p=0.61)
+— IC cruza zero. No horizonte de 8s a vantagem do agente **converge para empate
+estatístico** nos endpoints difíceis (veículo/ciclista), mas **nunca reverte
+significativamente** para o SDC. No braço sequential nem empate há (agente ainda
+vence VEHICLE_15 minFDE, p=0.03).
+
+**Veredicto 3 — H3, achado novo: a normalização fecha o gap flatten×GRU.** No
+braço **SDC**, o resultado da Parte A se repete limpo: flatten > sequential em
+**9/9** (minADE/minFDE/MR). No braço **agente**, os modelos ficam **essencialmente
+empatados** (flatten ganha 4–6/9 conforme a métrica, com vitórias e derrotas
+significativas equilibradas); em mAP o **sequential-agente é o melhor de todos**
+(0.140 vs 0.117). Leitura: a recorrência **sozinha** não pagava o próprio custo
+(Parte A), mas recorrência **+ estado rico + normalização agente-cêntrica** deixa
+o GRU competitivo. Reportável nos dois sentidos.
+
+**Veredicto 4 — o agente-cêntrico também estabiliza/barateia o treino.** Épocas
+até convergir (média ± desvio das 8 seeds) e energia por run (fase train,
+integrada do log da placa):
+
+| modelo | arm | épocas até best | tempo/run (s) | energia/run (Wh) |
+|--------|-----|-----------------|---------------|------------------|
+| flatten    | SDC    | 36.0 ± 19.3 | 84.8  | 0.64 |
+| flatten    | agente | 43.1 ± 5.5  | 99.8  | 0.73 |
+| sequential | agente | 65.9 ± 9.2  | 142.3 | 1.18 |
+| sequential | SDC    | 92.4 ± 21.6 | 185.6 | 1.51 |
+
+O `sequential-SDC` é o mais caro (mais épocas, maior energia) e o pior em
+métricas; o `sequential-agente` cai para ~66 épocas e metade da variância. Ou
+seja, a mesma intervenção metodológica melhora **acurácia e custo de treino** do
+GRU simultaneamente. A grade inteira (32 treinos) somou **~0.033 kWh / ~68 min**.
+
+**Veredicto 5 — confirmação quantitativa de input-bound (infra p/ Fase 2).**
+Telemetria da RTX 5060 Ti durante toda a grade: utilização **média 5.6%, p95 9%,
+pico 13%**; VRAM **máx 1766 MiB (11% de 16 GB)**; potência **média 29.5 W** (TDP
+~180 W). Os experimentos **não são GPU-bound** — o limitador é o dataload
+(CPU/IO em HDD). Implica folga enorme para a Fase 2 (vetorizado + mapa/social,
+atenção O(n²)) e legitima o próximo eixo **curva de dados**: provavelmente
+data-starved, então escalar cenários deve ser barato e reportável.
+
+**Caveats carregados (honestidade metodológica):**
+- `cls_weight=20` foi **herdado** do regime SDC e não re-varrido no item 4 —
+  possível leve viés pró-SDC. O agente venceu mesmo assim ⇒ conclusão **mais
+  forte** (ganhou em desvantagem).
+- **N=8 fixado a priori.** Não adicionar seeds após ver o resultado (p-hacking).
+- Comparação sobre métricas oficiais (minADE/minFDE/MR/mAP), **nunca** `Val(top-1)`.
+- `mAP` é a métrica mais ruidosa (desvio ~ metade da média em vários breakdowns);
+  a direção agente > SDC é consistente e significativa nos breakdowns fortes
+  (VEH_5, PED_5, PED_15), mas não usar como critério fino de ranking.
+
+**Decisão para a Fase 2:** a melhor config do item 4 é **flatten-agente** em
+distância/miss (com sequential-agente competitivo e à frente em mAP). Fixar
+flatten-agente como base para (a) a **curva de dados** e (b) o salto arquitetural
+para o modelo **vetorizado com mapa** — cada eixo isolado, sem misturar com esta
+grade (seria confound).
 
 ---
 
@@ -478,7 +569,7 @@ cd /workspace && python3 -m src.motion.train_motion
 cd /workspace && python3 -m src.motion.run_inference
 
 # Validacao oficial (container METRICAS)
-cd /workspace && python3 -m src.core.validate_motion_official
+cd /workspace && python3 -m src.motion.validate_motion_official
 
 # Monitorar GPU durante o treino
 watch -n 1 nvidia-smi

@@ -21,12 +21,17 @@ Prediction — a decidir conforme o projeto avança.
 
 ## Status atual
 
-🟢 **Milestone 1 concluído (Motion, etapa de aquecimento):** pipeline de
-Motion Prediction funcional de ponta a ponta no Waymo Open Motion Dataset
-— desde a leitura dos dados brutos até a validação com as métricas
-oficiais do desafio (minADE, minFDE, Miss Rate, mAP). Ver
-[`docs/waymo_motion.md`](docs/waymo_motion.md) para o relatório técnico
-completo dessa etapa.
+🟢 **Etapa de Motion concluída (aquecimento):** pipeline de Motion
+Prediction funcional de ponta a ponta no Waymo Open Motion Dataset — desde
+a leitura dos dados brutos até a validação com as métricas oficiais do
+desafio (minADE, minFDE, Miss Rate, mAP). A espinha de experimentos
+controlados `MLP → encoder sequencial → normalização agente-cêntrica` está
+fechada e validada com múltiplas seeds; próximo degrau é o modelo
+vetorizado com contexto de mapa. Registro técnico completo (setup, bugs
+corrigidos, resultados por seed, limitações) em
+[`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md). *(Um
+relatório destilado `docs/waymo_motion.md` está planejado, caso a etapa
+renda um paper próprio de Motion.)*
 
 🔜 **Próxima fase:** migração de foco para Perception, com expansão para
 outros datasets (ZOD, A2D2) visando benchmarking e comparação
@@ -46,7 +51,8 @@ cross-dataset.
 ```
 .
 ├── docs/
-│   └── waymo_motion.md       # documentação técnica da etapa de Motion (setup, bugs, resultados)
+│   ├── DOCUMENTACAO_PROJETO.md  # registro técnico da etapa de Motion (setup, bugs, resultados por seed)
+│   └── waymo_motion.md          # (planejado) relatório destilado de Motion
 ├── docker/
 │   ├── waymo-metrics/        # container CPU: leitura de dados + métricas oficiais (TF)
 │   └── training-v1/          # container GPU: treino de modelos (PyTorch)
@@ -89,7 +95,7 @@ python3 -m src.motion.validate_motion_official
 
 Detalhes completos (formato de dados, bugs corrigidos, resultados de
 validação, limitações conhecidas) em
-[`docs/waymo_motion.md`](docs/waymo_motion.md).
+[`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md).
 
 ## Próximos passos
 

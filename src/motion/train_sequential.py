@@ -188,8 +188,14 @@ def train(cls_weight, agent_centric, seed=None):
     print(f"[OK] Validation (official 'validation' split): {len(val_dataset)} examples")
     print(f"[OK] Features {FEATURES} -> n_features={n_features} (agent_centric={agent_centric})")
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    # Input-bound training (the GPU sits mostly idle): the win is in the
+    # dataloader, not the model. More workers + pinned memory + persistent
+    # workers keep the GPU fed. BATCH_SIZE stays 64 on purpose -- changing it
+    # would change the optimization and add a confound to the controlled grid.
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=8, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
+                            num_workers=8, pin_memory=True, persistent_workers=True)
 
     model = SequentialTrajectoryPredictor(
         input_steps=11, output_steps=80, num_modes=NUM_MODES, n_features=n_features
