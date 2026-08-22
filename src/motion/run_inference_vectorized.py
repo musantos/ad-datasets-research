@@ -30,7 +30,7 @@ CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
 PRED_ROOT = "/workspace/datasets/waymo/predictions"
 
 
-def run_inference(tag, agent_centric, seed=None):
+def run_inference(tag, agent_centric, seed=None, standardize=False):
     """
     tag:           experiment identifier, e.g. 'cls20'.
     agent_centric: selects the grid arm. MUST match the training run:
@@ -39,14 +39,22 @@ def run_inference(tag, agent_centric, seed=None):
                             here before saving).
                    False -> SDC-centric (predictions already in the SDC frame).
     seed:          optional; selects the seeded run folder, matching train_*.py.
+    standardize:   V0-std run. Selects the _std run folder. NÃO altera a ciência
+                   da inferência: as stats de padronização vivem nos BUFFERS do
+                   checkpoint e são restauradas por load_state_dict abaixo. Este
+                   flag só compõe o path (senão a inferência abriria o checkpoint
+                   raw). A saída segue no frame agente em metros -> a inversão
+                   agente->SDC é idêntica em raw e std.
 
-    Paths (arm is folded into the tag so {sdc, agent} never collide):
-        Checkpoint: checkpoints/vectorized_<tag>_<arm>[_seed<n>]/vectorized_best.pth
-        Output:     predictions/vectorized_<tag>_<arm>[_seed<n>]/
+    Paths (arm e std entram no tag para que {sdc,agent}x{raw,std} nunca colidam):
+        Checkpoint: checkpoints/vectorized_<tag>_<arm>[_seed<n>][_std]/vectorized_best.pth
+        Output:     predictions/vectorized_<tag>_<arm>[_seed<n>][_std]/
     """
     arm = "agent" if agent_centric else "sdc"
     base_tag = f"{tag}_{arm}"
     run_tag = base_tag if seed is None else f"{base_tag}_seed{seed}"
+    if standardize:
+        run_tag = f"{run_tag}_std"
     checkpoint_path = os.path.join(
         CHECKPOINT_ROOT, f"vectorized_{run_tag}", "vectorized_best.pth"
     )
@@ -73,7 +81,35 @@ def run_inference(tag, agent_centric, seed=None):
     model = VectorizedTrajectoryPredictor(
         input_steps=11, output_steps=80, num_modes=NUM_MODES, n_features=n_features
     ).to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    # Load TOLERANTE dos buffers de padronização. Checkpoints RAW antigos
+    # (treinados antes dos buffers existirem) não têm feat_mean/feat_std ->
+    # strict=True quebraria. strict=False deixa os buffers no DEFAULT identidade
+    # (0/1), que é EXATAMENTE o regime raw (sem padronização). Mas strict=False
+    # é perigoso (mascara chaves faltando de verdade), então guardamos:
+    #   - a ÚNICA coisa que pode faltar são os 2 buffers de padronização;
+    #   - nada pode sobrar (unexpected);
+    #   - se for run STD, os buffers TÊM de estar presentes (senão as stats se
+    #     perderam -> resultado silenciosamente errado). Aborta nesse caso.
+    STD_BUFFERS = {"feat_mean", "feat_std"}
+    res = model.load_state_dict(torch.load(checkpoint_path, map_location=device),
+                                strict=False)
+    missing = set(res.missing_keys)
+    unexpected = set(res.unexpected_keys)
+    if not missing.issubset(STD_BUFFERS) or unexpected:
+        raise RuntimeError(
+            f"checkpoint incompatível: missing={sorted(missing)} "
+            f"unexpected={sorted(unexpected)}. Só os buffers "
+            f"{sorted(STD_BUFFERS)} podem faltar, e nada pode sobrar."
+        )
+    if missing:
+        if standardize:
+            raise RuntimeError(
+                f"run --standardize mas o checkpoint não tem {sorted(missing)}: "
+                "as stats de padronização se perderam. Abortando (resultado seria "
+                "silenciosamente raw)."
+            )
+        print(f"[INFO] checkpoint sem buffers de padronização {sorted(missing)} "
+              "-> identidade (regime RAW). Esperado para checkpoints raw antigos.")
     model.eval()
 
     # Regroup the flat samples back by scenario file, so the output keeps the
@@ -161,6 +197,11 @@ if __name__ == "__main__":
                         help="agent-centric arm; MUST match training. Omit for SDC-centric.")
     parser.add_argument("--seed", type=int, default=None,
                         help="RNG seed used at training; selects the run folder (..._seed<n>)")
+    parser.add_argument("--standardize", action="store_true",
+                        help="V0-std: seleciona o checkpoint _std. As stats vêm do "
+                             "próprio checkpoint (buffers); este flag só compõe o path. "
+                             "MUST match training.")
     args = parser.parse_args()
 
-    run_inference(tag=args.tag, agent_centric=args.agent_centric, seed=args.seed)
+    run_inference(tag=args.tag, agent_centric=args.agent_centric, seed=args.seed,
+                  standardize=args.standardize)

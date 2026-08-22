@@ -42,13 +42,16 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 _TS = r"\d{4}-\d{2}-\d{2}(?:_\d{2}-\d{2}-\d{2})?"
 
+# V0-std: o sufixo _std é OPCIONAL e vem DEPOIS do seed, ANTES do timestamp.
+# Ausente -> variant='raw'; presente -> variant='std'. A ordem dos grupos casa
+# o run_tag do train/inference: cls<w>_<arm>_seed<s>[_std][_<ts>].
 RE_TRAIN = re.compile(
     r"^(?P<model>vectorized)_cls(?P<cls>\d+)_(?P<arm>sdc|agent)"
-    r"_seed(?P<seed>\d+)(?:_(?P<ts>" + _TS + r"))?\.csv$"
+    r"_seed(?P<seed>\d+)(?P<std>_std)?(?:_(?P<ts>" + _TS + r"))?\.csv$"
 )
 RE_METRICS = re.compile(
     r"^metrics_(?P<model>vectorized)_cls(?P<cls>\d+)_(?P<arm>sdc|agent)"
-    r"_seed(?P<seed>\d+)(?:_(?P<ts>" + _TS + r"))?\.csv$"
+    r"_seed(?P<seed>\d+)(?P<std>_std)?(?:_(?P<ts>" + _TS + r"))?\.csv$"
 )
 
 
@@ -63,7 +66,8 @@ def pick_latest(files, regex):
         if not m:
             ignored.append(f.name)
             continue
-        cfg = (m["model"], int(m["cls"]), m["arm"], int(m["seed"]))
+        variant = "std" if m.group("std") else "raw"
+        cfg = (m["model"], int(m["cls"]), m["arm"], variant, int(m["seed"]))
         ts = m["ts"] or ""
         by_cfg[cfg].append((ts, f))
 
@@ -93,17 +97,18 @@ def build_metrics(results_dir, out_path):
     print(f"[metricas] {len(chosen)} runs casados; {len(ignored)} arquivos ignorados")
 
     rows = []
-    for (model, cls, arm, seed), f in sorted(chosen.items()):
+    for (model, cls, arm, variant, seed), f in sorted(chosen.items()):
         for r in read_csv_skip_comments(f):
             rows.append({
-                "model": model, "cls_weight": cls, "arm": arm, "seed": seed,
+                "model": model, "cls_weight": cls, "arm": arm,
+                "variant": variant, "seed": seed,
                 "breakdown_name": r["breakdown_name"],
                 "minADE": r["minADE"], "minFDE": r["minFDE"],
                 "MissRate": r["MissRate"], "OverlapRate": r["OverlapRate"],
                 "mAP": r["mAP"],
             })
 
-    fields = ["model", "cls_weight", "arm", "seed", "breakdown_name",
+    fields = ["model", "cls_weight", "arm", "variant", "seed", "breakdown_name",
               "minADE", "minFDE", "MissRate", "OverlapRate", "mAP"]
     with open(out_path, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
@@ -123,7 +128,7 @@ def build_train_summary(logs_dir, out_path):
     print(f"[treino]   {len(chosen)} runs casados; {len(ignored)} arquivos ignorados")
 
     rows = []
-    for (model, cls, arm, seed), f in sorted(chosen.items()):
+    for (model, cls, arm, variant, seed), f in sorted(chosen.items()):
         data = read_csv_skip_comments(f)
         if not data:
             print(f"  [vazio] {f.name}", file=sys.stderr)
@@ -136,7 +141,8 @@ def build_train_summary(logs_dir, out_path):
         total_epochs = int(last["epoch"])
         total_time = float(last["cum_time_s"])
         rows.append({
-            "model": model, "cls_weight": cls, "arm": arm, "seed": seed,
+            "model": model, "cls_weight": cls, "arm": arm,
+            "variant": variant, "seed": seed,
             "best_epoch": best_epoch,
             "time_to_best_s": round(t_best, 2),
             "total_epochs": total_epochs,
@@ -145,13 +151,13 @@ def build_train_summary(logs_dir, out_path):
             "epochs_after_best": total_epochs - best_epoch,
         })
 
-    fields = ["model", "cls_weight", "arm", "seed", "best_epoch", "time_to_best_s",
-              "total_epochs", "total_time_s", "epochs_after_best"]
+    fields = ["model", "cls_weight", "arm", "variant", "seed", "best_epoch",
+              "time_to_best_s", "total_epochs", "total_time_s", "epochs_after_best"]
     with open(out_path, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         w.writerows(sorted(rows, key=lambda x: (x["model"], x["cls_weight"],
-                                                x["arm"], x["seed"])))
+                                                x["arm"], x["variant"], x["seed"])))
     print(f"[treino]   -> {out_path}  ({len(rows)} linhas)")
     return len(chosen)
 
@@ -161,9 +167,10 @@ def main():
     ap.add_argument("--logs-dir", default="experiments/logs")
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--out-dir", default=".")
-    ap.add_argument("--expected", type=int, default=8,
-                    help="numero esperado de runs por tipo (V0: 1 modelo x "
-                         "1 braco x 8 seeds = 8)")
+    ap.add_argument("--expected", type=int, default=16,
+                    help="numero esperado de runs por tipo (V0-std: 1 modelo x "
+                         "1 braco x 2 variantes {raw,std} x 8 seeds = 16). "
+                         "Use --expected 8 se rodar so uma variante.")
     args = ap.parse_args()
 
     out = Path(args.out_dir)

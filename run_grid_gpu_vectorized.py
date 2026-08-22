@@ -4,8 +4,12 @@ V0 grid (vectorized), GPU phase (train -> infer), run IN THE GPU
 CONTAINER. The metrics phase (validate_motion_official) runs separately in the
 CPU/TF container -- see run_grid_validate.py.
 
-V0 (Fase 2, vetorizado): {vectorized} x {agent} x seeds 0..7, cls20.
-That is 1 config x 8 seeds = 8 train runs + 8 inference runs.
+V0 (Fase 2, vetorizado): {vectorized} x {agent} x {raw, std} x seeds 0..7, cls20.
+That is 1 model x 1 arm x 2 variants x 8 seeds = 16 train runs + 16 inference
+runs. The 'std' variant adds --standardize (features padronizadas com stats
+congeladas do cache_train; sin/cos passthrough) e sufixa o run com _std, então
+raw e std NUNCA compartilham checkpoint/pred dir. Precisa das stats geradas
+antes: python3 -m src.motion.compute_feature_stats.
 
 Design:
   * RESUMABLE / IDEMPOTENT. Each (model, arm, seed) writes a sentinel on clean
@@ -32,6 +36,7 @@ from datetime import datetime
 # --- grid definition (opcao C: cls fixed at 20) ------------------------------
 MODELS = ["vectorized"]
 ARMS = ["agent"]          # "agent" adds --agent-centric
+VARIANTS = ["raw", "std"]        # "std" adds --standardize + suffix _std
 SEEDS = list(range(8))           # 0..7  (fixed N, decided up front)
 CLS_WEIGHT = 20
 
@@ -103,57 +108,63 @@ def stop_gpu_loggers():
             pass
 
 
-def run_tag(arm, seed):
-    return f"cls{CLS_WEIGHT:g}_{arm}_seed{seed}"
+def run_tag(arm, seed, variant):
+    t = f"cls{CLS_WEIGHT:g}_{arm}_seed{seed}"
+    return f"{t}_std" if variant == "std" else t
 
 
-def train_sentinel(model, arm, seed):
-    d = os.path.join(CHECKPOINT_ROOT, f"{model}_{run_tag(arm, seed)}")
+def train_sentinel(model, arm, seed, variant):
+    d = os.path.join(CHECKPOINT_ROOT, f"{model}_{run_tag(arm, seed, variant)}")
     return os.path.join(d, ".train_done")
 
 
-def infer_sentinel(model, arm, seed):
-    d = os.path.join(PRED_ROOT, f"{model}_{run_tag(arm, seed)}")
+def infer_sentinel(model, arm, seed, variant):
+    d = os.path.join(PRED_ROOT, f"{model}_{run_tag(arm, seed, variant)}")
     return os.path.join(d, ".infer_done")
 
 
-def build_train_cmd(model, arm, seed):
+def build_train_cmd(model, arm, seed, variant):
     cmd = [PYEXE, "-m", f"src.motion.train_{model}",
            "--cls-weight", str(CLS_WEIGHT), "--seed", str(seed)]
     if arm == "agent":
         cmd.append("--agent-centric")
+    if variant == "std":
+        cmd.append("--standardize")
     return cmd
 
 
-def build_infer_cmd(model, arm, seed):
+def build_infer_cmd(model, arm, seed, variant):
     cmd = [PYEXE, "-m", f"src.motion.run_inference_{model}",
            "--tag", f"cls{CLS_WEIGHT:g}", "--seed", str(seed)]
     if arm == "agent":
         cmd.append("--agent-centric")
+    if variant == "std":
+        cmd.append("--standardize")
     return cmd
 
 
-def run_phase(index_writer, index_fh, model, arm, seed, phase, cmd, sentinel):
+def run_phase(index_writer, index_fh, model, arm, variant, seed, phase, cmd, sentinel):
     """Run one train/infer phase, logging its time window to the phase index."""
+    label = f"{model}/{arm}/{variant}/seed{seed}/{phase}"
     if os.path.exists(sentinel):
-        print(f"[skip] {model}/{arm}/seed{seed}/{phase} (sentinel present)")
+        print(f"[skip] {label} (sentinel present)")
         return True
 
-    print(f"\n{'='*78}\n[run ] {model}/{arm}/seed{seed}/{phase}\n"
+    print(f"\n{'='*78}\n[run ] {label}\n"
           f"       {' '.join(cmd)}\n{'='*78}")
     start_iso, start_epoch = ts(), time.time()
     proc = subprocess.run(cmd)
     end_iso, end_epoch = ts(), time.time()
 
     index_writer.writerow([
-        model, arm, seed, phase, start_iso, end_iso,
+        model, arm, variant, seed, phase, start_iso, end_iso,
         f"{start_epoch:.3f}", f"{end_epoch:.3f}",
         f"{end_epoch - start_epoch:.1f}", proc.returncode,
     ])
     index_fh.flush()
 
     if proc.returncode != 0:
-        print(f"[FAIL] {model}/{arm}/seed{seed}/{phase} "
+        print(f"[FAIL] {label} "
               f"exited {proc.returncode}; NOT writing sentinel (will retry on relaunch).")
         return False
 
@@ -184,35 +195,36 @@ def main():
                    f"gpu_procs={os.path.basename(procs_path) if procs_path else 'NA'}\n")
     index_writer = csv.writer(index_fh)
     index_writer.writerow([
-        "model", "arm", "seed", "phase",
+        "model", "arm", "variant", "seed", "phase",
         "start_iso", "end_iso", "start_epoch", "end_epoch",
         "duration_s", "returncode",
     ])
     index_fh.flush()
     print(f"[phase-index] {index_path}")
 
-    total = len(MODELS) * len(ARMS) * len(SEEDS)
+    total = len(MODELS) * len(ARMS) * len(VARIANTS) * len(SEEDS)
     done = 0
     grid_start = time.time()
 
     try:
         for model in MODELS:
             for arm in ARMS:
-                for seed in SEEDS:
-                    done += 1
-                    print(f"\n########## combo {done}/{total}: "
-                          f"{model} / {arm} / seed{seed} ##########")
+                for variant in VARIANTS:
+                    for seed in SEEDS:
+                        done += 1
+                        print(f"\n########## combo {done}/{total}: "
+                              f"{model} / {arm} / {variant} / seed{seed} ##########")
 
-                    ok = run_phase(index_writer, index_fh, model, arm, seed,
-                                   "train", build_train_cmd(model, arm, seed),
-                                   train_sentinel(model, arm, seed))
-                    if not ok:
-                        print("       -> skipping inference for this combo (train failed).")
-                        continue
+                        ok = run_phase(index_writer, index_fh, model, arm, variant, seed,
+                                       "train", build_train_cmd(model, arm, seed, variant),
+                                       train_sentinel(model, arm, seed, variant))
+                        if not ok:
+                            print("       -> skipping inference for this combo (train failed).")
+                            continue
 
-                    run_phase(index_writer, index_fh, model, arm, seed,
-                              "infer", build_infer_cmd(model, arm, seed),
-                              infer_sentinel(model, arm, seed))
+                        run_phase(index_writer, index_fh, model, arm, variant, seed,
+                                  "infer", build_infer_cmd(model, arm, seed, variant),
+                                  infer_sentinel(model, arm, seed, variant))
     finally:
         index_fh.close()
         stop_gpu_loggers()

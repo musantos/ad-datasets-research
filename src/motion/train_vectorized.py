@@ -50,6 +50,12 @@ CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
 # model + cls_weight + arm + seed + timestamp so runs never overwrite).
 LOG_ROOT = "/workspace/experiments/logs"
 
+# V0-std: stats de feature congeladas (mean/std por-canal do cache_train),
+# geradas UMA vez por compute_feature_stats.py. Carregadas para os buffers do
+# modelo quando --standardize. Default aponta pro arquivo canônico; sobrescrito
+# por --stats-path se necessário.
+STATS_PATH = "/workspace/experiments/feature_stats.npy"
+
 
 def masked_mse_per_mode(outputs, targets, mask):
     """
@@ -139,7 +145,8 @@ def wta_loss(outputs, scores, targets, mask, cls_weight):
     }
 
 
-def train(cls_weight, agent_centric, seed=None):
+def train(cls_weight, agent_centric, seed=None, standardize=False,
+          stats_path=STATS_PATH):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Reproducibility: when --seed is given, seed every RNG. The seed also
@@ -153,9 +160,14 @@ def train(cls_weight, agent_centric, seed=None):
         torch.cuda.manual_seed_all(seed)
 
     # Grid arm goes into the tag so {sdc, agent} never share a checkpoint dir.
+    # V0-std: o sufixo _std entra no FIM do run_tag (depois do seed), então
+    # {raw, std} nunca compartilham checkpoint/log/pred dir e o consolidate
+    # separa as duas variantes pelo nome. Ordem: cls<w>_<arm>[_seed<s>][_std].
     arm = "agent" if agent_centric else "sdc"
     tag = f"cls{cls_weight:g}_{arm}"
     run_tag = tag if seed is None else f"{tag}_seed{seed}"
+    if standardize:
+        run_tag = f"{run_tag}_std"
     checkpoint_dir = os.path.join(CHECKPOINT_ROOT, f"vectorized_{run_tag}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -201,6 +213,24 @@ def train(cls_weight, agent_centric, seed=None):
         input_steps=11, output_steps=80, num_modes=NUM_MODES, n_features=n_features
     ).to(device)
 
+    # V0-std: carrega as stats congeladas para os buffers do modelo. Feito
+    # DEPOIS do .to(device) e ANTES do treino, então os buffers (que viajam no
+    # checkpoint) já saem padronizados. Sem --standardize, buffers ficam
+    # identidade (0/1) -> entrada crua, idêntica ao V0-raw.
+    if standardize:
+        if not os.path.exists(stats_path):
+            print(f"[ERROR] --standardize pediu stats mas o arquivo não existe: {stats_path}")
+            print("        Gere-o UMA vez com: python3 -m src.motion.compute_feature_stats")
+            return
+        model.load_feature_stats(stats_path)
+        fm = model.feat_mean.detach().cpu().tolist()
+        fs = model.feat_std.detach().cpu().tolist()
+        print(f"[OK] Padronização ATIVA (V0-std). stats: {stats_path}")
+        print(f"     mean/canal = {[round(v,3) for v in fm]}")
+        print(f"     std /canal = {[round(v,3) for v in fs]}  (canais 2,3=sin,cos passthrough)")
+    else:
+        print("[OK] Padronização OFF (V0-raw): entrada crua, buffers identidade.")
+
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[OK] Vectorized model: {n_params:,} parameters")
     print(f"[OK] Checkpoints in: {checkpoint_dir}")
@@ -221,7 +251,8 @@ def train(cls_weight, agent_centric, seed=None):
     log_path = os.path.join(LOG_ROOT, f"vectorized_{run_tag}_{stamp}.csv")
     log_file = open(log_path, "w", newline="")
     log_file.write(f"# model=vectorized,cls_weight={cls_weight},arm={arm},"
-                   f"n_features={n_features},seed={seed},checkpoint_dir={checkpoint_dir}\n")
+                   f"n_features={n_features},seed={seed},standardize={int(standardize)},"
+                   f"checkpoint_dir={checkpoint_dir}\n")
     log_writer = csv.writer(log_file)
     log_writer.writerow([
         "epoch", "train_loss", "val_best_mode", "val_top1", "val_chance",
@@ -397,6 +428,14 @@ if __name__ == "__main__":
                         help="agent-centric normalization arm; omit for the SDC-centric arm")
     parser.add_argument("--seed", type=int, default=None,
                         help="RNG seed; also suffixes the run folder/log (..._seed<n>)")
+    parser.add_argument("--standardize", action="store_true",
+                        help="V0-std: padroniza a entrada com stats congeladas do "
+                             "cache_train (sin/cos passthrough). Sufixa o run com _std. "
+                             "Omitir = V0-raw (entrada crua).")
+    parser.add_argument("--stats-path", default=STATS_PATH,
+                        help=f"caminho do .npy de stats (default: {STATS_PATH}). "
+                             "Só usado com --standardize.")
     args = parser.parse_args()
 
-    train(cls_weight=args.cls_weight, agent_centric=args.agent_centric, seed=args.seed)
+    train(cls_weight=args.cls_weight, agent_centric=args.agent_centric,
+          seed=args.seed, standardize=args.standardize, stats_path=args.stats_path)

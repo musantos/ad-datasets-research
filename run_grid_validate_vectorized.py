@@ -28,6 +28,7 @@ import subprocess
 
 MODELS = ["vectorized"]
 ARMS = ["agent"]
+VARIANTS = ["raw", "std"]        # "std" -> pred dir e metrics CSV com sufixo _std
 SEEDS = list(range(8))
 CLS_WEIGHT = 20
 
@@ -40,22 +41,23 @@ METRICS_DIR = os.environ.get("METRICS_DIR", "/workspace/experiments/metrics")
 PYEXE = sys.executable or "python3"
 
 
-def run_tag(arm, seed):
-    return f"cls{CLS_WEIGHT:g}_{arm}_seed{seed}"
+def run_tag(arm, seed, variant):
+    t = f"cls{CLS_WEIGHT:g}_{arm}_seed{seed}"
+    return f"{t}_std" if variant == "std" else t
 
 
-def pred_dir(model, arm, seed):
-    return os.path.join(PRED_ROOT, f"{model}_{run_tag(arm, seed)}")
+def pred_dir(model, arm, seed, variant):
+    return os.path.join(PRED_ROOT, f"{model}_{run_tag(arm, seed, variant)}")
 
 
-def metrics_glob(model, arm, seed):
+def metrics_glob(model, arm, seed, variant):
     # matches metrics_<rundir>_<date>.csv regardless of the date suffix
-    rundir = f"{model}_{run_tag(arm, seed)}"
+    rundir = f"{model}_{run_tag(arm, seed, variant)}"
     return os.path.join(METRICS_DIR, f"metrics_{rundir}_*.csv")
 
 
 def main():
-    total = len(MODELS) * len(ARMS) * len(SEEDS)
+    total = len(MODELS) * len(ARMS) * len(VARIANTS) * len(SEEDS)
     done = 0
     n_ok = 0
     n_skip = 0
@@ -64,30 +66,31 @@ def main():
 
     for model in MODELS:
         for arm in ARMS:
-            for seed in SEEDS:
-                done += 1
-                d = pred_dir(model, arm, seed)
-                tag = f"{model}/{arm}/seed{seed}"
+            for variant in VARIANTS:
+                for seed in SEEDS:
+                    done += 1
+                    d = pred_dir(model, arm, seed, variant)
+                    tag = f"{model}/{arm}/{variant}/seed{seed}"
 
-                if not os.path.isdir(d) or not glob.glob(os.path.join(d, "*.npy")):
-                    print(f"[warn] {done}/{total} {tag}: no predictions at {d} "
-                          f"(run the GPU phase first). Skipping.")
-                    missing_preds.append(tag)
-                    continue
+                    if not os.path.isdir(d) or not glob.glob(os.path.join(d, "*.npy")):
+                        print(f"[warn] {done}/{total} {tag}: no predictions at {d} "
+                              f"(run the GPU phase first). Skipping.")
+                        missing_preds.append(tag)
+                        continue
 
-                if glob.glob(metrics_glob(model, arm, seed)):
-                    print(f"[skip] {done}/{total} {tag}: metrics CSV already present.")
-                    n_skip += 1
-                    continue
+                    if glob.glob(metrics_glob(model, arm, seed, variant)):
+                        print(f"[skip] {done}/{total} {tag}: metrics CSV already present.")
+                        n_skip += 1
+                        continue
 
-                cmd = [PYEXE, "-m", VALIDATE_MODULE, "--pred-dir", d, "--cleanup"]
-                print(f"\n{'='*78}\n[val ] {done}/{total} {tag}\n       {' '.join(cmd)}\n{'='*78}")
-                rc = subprocess.run(cmd).returncode
-                if rc == 0:
-                    n_ok += 1
-                else:
-                    print(f"[FAIL] {tag} exited {rc}.")
-                    n_fail += 1
+                    cmd = [PYEXE, "-m", VALIDATE_MODULE, "--pred-dir", d, "--cleanup"]
+                    print(f"\n{'='*78}\n[val ] {done}/{total} {tag}\n       {' '.join(cmd)}\n{'='*78}")
+                    rc = subprocess.run(cmd).returncode
+                    if rc == 0:
+                        n_ok += 1
+                    else:
+                        print(f"[FAIL] {tag} exited {rc}.")
+                        n_fail += 1
 
     print(f"\n[DONE] metrics phase: {n_ok} evaluated, {n_skip} skipped, {n_fail} failed.")
     if missing_preds:

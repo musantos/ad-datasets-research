@@ -134,6 +134,26 @@ class VectorizedTrajectoryPredictor(nn.Module):
         self.n_features = n_features
         self.hidden_dim = hidden_dim
 
+        # --- Padronização de features (V0-std) como BUFFERS persistentes -----
+        # O comportamento é DETERMINADO pelo buffer, não por uma flag Python:
+        # forward SEMPRE aplica (x - feat_mean) / feat_std. Com os defaults
+        # abaixo (mean=0, std=1) isso é IDENTIDADE -> V0-raw, entrada crua,
+        # bit-a-bit como antes. load_feature_stats() sobrescreve os buffers com
+        # as stats congeladas do cache_train -> V0-std.
+        #
+        # Por que buffer e não pré-processamento no dataloader: buffers entram
+        # no state_dict e VIAJAM COM O CHECKPOINT. A inferência reconstrói o
+        # modelo, dá load_state_dict, e recebe as mesmas stats automaticamente
+        # -> paridade train/inferência por construção, sem risco de transform
+        # divergente (a falha silenciosa clássica). run_inference_vectorized NÃO
+        # precisa saber de stats; só do sufixo _std no path do checkpoint.
+        #
+        # sin/cos ficam PASSTHROUGH (mean=0, std=1) por decisão: já ∈ [-1,1], e
+        # padronizá-los não paga; o ganho é em x,y (espalhamento) e vx,vy. Essa
+        # decisão é gravada no ARQUIVO de stats (canais 2,3 = 0/1), não aqui.
+        self.register_buffer("feat_mean", torch.zeros(n_features))
+        self.register_buffer("feat_std", torch.ones(n_features))
+
         # Encoder: subgraph VectorNet sobre a polyline de 10 vetores (9 feats/nó).
         f_vec = 9
         layers, cur = [], f_vec
@@ -153,11 +173,46 @@ class VectorizedTrajectoryPredictor(nn.Module):
         # saving, because the official metric expects comparable scores).
         self.score_head = nn.Linear(hidden_dim, num_modes)
 
+    def load_feature_stats(self, path):
+        """Carrega stats congeladas (mean/std por-canal) para dentro dos buffers.
+
+        O arquivo é um dict np.save'd com chaves 'mean' e 'std', ambas [6], já
+        com sin/cos em passthrough (mean=0/std=1 nos canais 2,3). Chamado no
+        treino quando --standardize; a inferência NÃO chama isto (recebe as
+        stats via load_state_dict do checkpoint). Idempotente."""
+        import numpy as _np
+        blob = _np.load(path, allow_pickle=True).item()
+        mean = torch.as_tensor(blob["mean"], dtype=self.feat_mean.dtype)
+        std = torch.as_tensor(blob["std"], dtype=self.feat_std.dtype)
+        assert mean.shape == self.feat_mean.shape == std.shape, (
+            f"stats com shape errado: mean{tuple(mean.shape)} "
+            f"std{tuple(std.shape)} != esperado {tuple(self.feat_mean.shape)}"
+        )
+        assert torch.all(std > 0), "feat_std tem canal <= 0 (divisão por zero)"
+        # copy_ preserva o device/dtype dos buffers e mantém tudo no state_dict.
+        self.feat_mean.copy_(mean)
+        self.feat_std.copy_(std)
+
     def forward(self, x, check_frame=False):
         # x arrives as [batch, 11, n_features].
         batch_size = x.shape[0]
 
-        vec = build_vectors(x, check_frame=check_frame)   # [B,10,9]
+        # Padronização (identidade quando buffers = 0/1). Broadcasting [6] sobre
+        # [B,11,6]. Feita ANTES de build_vectors: os vetores VectorNet passam a
+        # ser derivados da entrada padronizada (x,y espalhados, vx,vy em z-score,
+        # sin/cos intactos). A saída (traj_head) segue no frame agente em METROS
+        # -- padroniza-se só a ENTRADA, então a inversão agente->SDC da
+        # inferência é inalterada.
+        if check_frame:
+            # Asserts de frame pressupõem o frame agente CRU (pos[10]=(0,0),
+            # (sin,cos)[10]=(0,1)); padronizar destrói isso. Então checa-se o
+            # frame no x CRU (descartado), antes de padronizar. Só ocorre no
+            # smoke/__main__ (default False no treino/inferência).
+            build_vectors(x, check_frame=True)
+
+        x = (x - self.feat_mean) / self.feat_std
+
+        vec = build_vectors(x, check_frame=False)   # [B,10,9]
         for layer in self.subgraph:
             vec = layer(vec)                               # [B,10,2*hidden]
         pooled = vec.max(dim=1).values                     # [B,2*hidden]
@@ -194,4 +249,32 @@ if __name__ == "__main__":
         traj, scores = model(test_input, check_frame=True)
         print(f"   Trajectories shape: {tuple(traj.shape)}")   # [2, 6, 80, 2]
         print(f"   Scores shape:       {tuple(scores.shape)}")  # [2, 6]
-    print("OK: shapes e frame agente-cêntrico validados.")
+
+    # --- Buffers de padronização: default IDENTIDADE == raw ------------------
+    m = VectorizedTrajectoryPredictor(hidden_dim=64, n_features=6)
+    assert torch.allclose(m.feat_mean, torch.zeros(6)) and torch.allclose(m.feat_std, torch.ones(6)), \
+        "default dos buffers não é identidade (raw quebrado)"
+    xa = _agent_centric(torch.randn(2, 11, 6))
+    t_raw, _ = m(xa.clone(), check_frame=True)   # identidade -> equivale a raw
+
+    # --- Caminho std: stats fake com sin/cos PASSTHROUGH (canais 2,3 = 0/1) --
+    # check_frame=True deve continuar passando: o frame é checado no x CRU
+    # ANTES de padronizar, então padronizar não dispara o assert.
+    fake_mean = torch.tensor([1.5, -0.3, 0.0, 0.0, 2.0, 0.1])
+    fake_std  = torch.tensor([8.0,  6.0, 1.0, 1.0, 3.0, 3.0])
+    m.feat_mean.copy_(fake_mean); m.feat_std.copy_(fake_std)
+    t_std, _ = m(xa.clone(), check_frame=True)   # não deve levantar assert
+    assert m.feat_mean[2] == 0 and m.feat_std[2] == 1 and m.feat_mean[3] == 0 and m.feat_std[3] == 1, \
+        "sin/cos não estão em passthrough"
+    assert not torch.allclose(t_raw, t_std), "std não mudou a saída (buffer ignorado?)"
+
+    # --- Buffers viajam no state_dict (paridade train/inferência) ------------
+    sd = m.state_dict()
+    assert "feat_mean" in sd and "feat_std" in sd, "buffers fora do state_dict!"
+    m2 = VectorizedTrajectoryPredictor(hidden_dim=64, n_features=6)
+    m2.load_state_dict(sd)
+    assert torch.allclose(m2.feat_mean, fake_mean) and torch.allclose(m2.feat_std, fake_std), \
+        "load_state_dict não restaurou as stats -> inferência veria stats erradas"
+
+    print("OK: shapes, frame agente-cêntrico, passthrough sin/cos, e "
+          "paridade via state_dict validados (raw==identidade, std!=raw).")

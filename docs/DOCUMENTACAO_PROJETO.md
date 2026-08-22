@@ -1,6 +1,6 @@
 # Projeto de Mestrado — Motion Prediction (Waymo Open Dataset)
 ### Documento de contexto
-Última atualização: 20 de agosto de 2026
+Última atualização: 22 de agosto de 2026
 
 > **Nota de leitura.** As seções **1–11** abaixo são o registro **histórico do
 > Milestone 1** (16/jul/2026: baseline MLP *unimodal*, `random_split`, 3 shards).
@@ -323,6 +323,156 @@ distância/miss (com sequential-agente competitivo e à frente em mAP). Fixar
 flatten-agente como base para (a) a **curva de dados** e (b) o salto arquitetural
 para o modelo **vetorizado com mapa** — cada eixo isolado, sem misturar com esta
 grade (seria confound).
+
+---
+
+### 0.10. V0 — encoder vetorizado (VectorNet) *(21/ago/2026)* — fecha o V0
+
+Primeiro degrau da **Fase 2 (vetorizado)**. Substitui o encoder *flatten* (MLP)
+pelo **subgraph VectorNet** (polyline + agregação), mantendo tudo o mais igual
+(saída `[B,6,80,2]`+`[B,6]`, K=6, WTA, métricas oficiais, mesmo cache). NÃO
+adiciona contexto — social é o V1, mapa é o V2. A normalização agente-cêntrica
+(item 4) entra como **frame de referência da entrada**, não como braço separado.
+
+Grade completa: **1 modelo × 1 braço (agente) × 2 variantes {raw, std} × 8 seeds
+= 16 runs**, `cls_weight=20`, at convergence (`patience=10`), mesmo cache
+(`cache_train=2972`/13204 exemplos-agente; `cache_val=879`/3837), métricas
+oficiais. Média ± desvio (populacional) sobre as 8 seeds; cada seed = média das 9
+breakdowns.
+
+**Arquitetura (decisões a priori):** subgraph VectorNet `hidden_dim=64`,
+`n_layers=2`, 10 vetores por agente, entrada 9-dim (`xs,ys,xe,ye,sin,cos,vx,vy,dt`
+derivados on-the-fly do histórico `[B,11,6]`). **~80k params** (¼ do flatten
+~320k) — NÃO casados de propósito (eixo de eficiência). Padronização = incremento
+medido e rotulado: stats por-canal congeladas do `cache_train`, **sin/cos
+passthrough** (mean=0/std=1), buffers persistentes que **viajam no checkpoint** —
+o buffer (identidade=raw, stats reais=std), não uma flag Python, determina o
+regime, garantindo paridade train/inferência por construção.
+
+**Métricas oficiais — overall (média das 9 breakdowns), média ± desvio das 8 seeds:**
+
+| métrica | RAW (8) | STD (8) | flatten-agente (8) | std−raw | std−flatten |
+|---|---|---|---|---|---|
+| minADE   | 1.468 ± 0.040 | 1.439 ± 0.038 | **1.394 ± 0.029** | −0.029 | +0.045 |
+| minFDE   | 3.409 ± 0.080 | 3.364 ± 0.083 | **3.293 ± 0.060** | −0.045 | +0.071 |
+| MissRate | 0.615 ± 0.022 | 0.613 ± 0.023 | **0.576 ± 0.018** | −0.002 | +0.037 |
+| mAP      | 0.119 ± 0.032 | 0.107 ± 0.016 | **0.117 ± 0.018** | −0.012 | −0.010 |
+
+**minADE por seed** (para variância): raw = [1.538, 1.429, 1.493, 1.493, 1.468,
+1.454, 1.400, 1.465]; std = [1.413, 1.422, 1.458, 1.413, 1.423, 1.511, 1.390,
+1.477]. (O seed0-raw = 1.538 foi o **pior** dos 8 — foi o que inflou o smoke de
+seed0 e encolheu o efeito aparente da padronização.)
+
+**Convergência** (train_summary): raw best_epoch 35–74 (total 83–158s); std
+best_epoch 47–112 (total 107–238s). Todos `epochs_after_best=10` → **todos
+pararam por early stopping no platô**, nenhum por budget. Grade metodologicamente
+sólida.
+
+**Veredicto 1 — a padronização ajuda pouco e não uniformemente.** Melhora minADE
+(−0.029) e minFDE (−0.045) de forma consistente — as métricas de *erro de
+posição*, onde espalhar x,y e normalizar vx,vy deveria pagar. Mas **MissRate quase
+não move** (−0.002) e **mAP piora** (−0.012, ruidoso: desvio raw ±0.032 alto).
+Padronizar refina a *geometria da trajetória*, mas não toca *cobertura*
+(MissRate) nem *ranqueamento* (mAP).
+
+**Veredicto 2 — std NÃO alcança o flatten-agente.** Continua atrás em 3/4 (minADE
++0.045, minFDE +0.071, MissRate +0.037), com barras que **não se sobrepõem** em
+minADE/minFDE. Empata em mAP (dentro do ruído). A padronização **estreitou** o gap
+mas não o **fechou**.
+
+**Veredicto 3 — o V0 fez seu trabalho.** Isolou a máquina vetorizada e mostrou que
+o gargalo de cobertura **não está no encoder nem na escala da entrada**. Se
+normalizar a entrada não move MissRate, o que falta é **contexto** (social/mapa).
+Isso **motiva o V1/V2** — é a ponte lógica pro próximo degrau.
+
+**Veredicto 4 — eixo de eficiência (params NÃO casados).** Tudo isso com **~80k
+params** (¼ do flatten). "Perde por +0.045 em minADE com 4× menos parâmetros" é
+uma frase de **eficiência**, não de derrota. Reportar params na tabela.
+
+**Pendência analítica opcional (não bloqueia):** teste t pareado por seed nas 4
+métricas (raw↔std, std↔flatten) formalizaria quais Δ passam de ruído. Os 16 runs
+consolidados já existem; a conclusão qualitativa NÃO depende disso.
+
+---
+
+### 0.11. V1 — contexto social (cross-attention) *(22/ago/2026)* — DIAGNÓSTICO EM ANDAMENTO
+
+> **Status: degrau NÃO fechado.** Apenas o **seed0 (raw)** foi medido — vale para
+> validar o pipeline, **não** para concluir sobre o efeito social. A grade de 8
+> seeds (`{raw,std}×8`) é o que decide, e está **pendente** (junto dos 3 scripts
+> de orquestração da grade). Os números abaixo são diagnóstico de 1 seed, com a
+> ressalva "seeds before conclusions". Não promover a resultado final.
+
+Segundo degrau da Fase 2. Adiciona os **outros agentes** da cena como polylines +
+**cross-attention** do alvo sobre eles (primeira vez que atenção aparece na
+escada). NÃO adiciona mapa (isso é o V2). Hipótese, sustentada pelo V0: o gap de
+**MissRate** vem de falta de contexto → V1 é o primeiro candidato a movê-lo.
+
+**Arquitetura (siblings limpos; o V0 NÃO foi editado):** encoder V0 + ramo social.
+Subgraph **compartilhado** alvo+vizinhos (importado do V0 → máquina idêntica por
+construção, o Δ métrico é atribuível só ao ramo social); vizinhos transformados
+para o **frame agente-cêntrico do alvo** (mesmo `p0,θ0` → zero drift de frame);
+cross-attention (`nn.MultiheadAttention`, 4 heads) + residual + LayerNorm;
+seleção determinística top-K por `(distância@10, id)`, **K=16** fixo a priori
+(flag `--n-neighbors`, fora do nome da pasta); **guard de zero-vizinhos** (evita
+NaN de softmax tudo-mascarado). **~97k params.** O cache atual **já guarda todos
+os agentes** da cena (`data['agents']`) → V1 não precisou reprocessar cache.
+
+**Seed0 (raw, cls20, K=16, at convergence) — média das 9 breakdowns vs âncoras V0:**
+
+| métrica | V1-social seed0 (raw) | V0-raw (8 seeds) | flatten-agente |
+|---|---|---|---|
+| minADE   | 1.488 | 1.468 ± 0.040 | **1.394** |
+| minFDE   | **3.260** | 3.409 ± 0.080 | 3.293 |
+| MissRate | 0.625 | 0.615 ± 0.022 | **0.576** |
+| mAP      | 0.056 | 0.119 ± 0.032 | **0.117** |
+
+(O seed0 do V0-raw era 1.538 em minADE — o **pior** dos 8. Comparar seed0-a-seed0
+é ruído; a comparação honesta é contra a **média** V0-raw.)
+
+**O achado — mAP pela METADE do V0, e por que NÃO é bug.** O mAP agregado (0.056)
+é ~½ do V0 (0.119). Quatro checagens descartam bug e uma localiza a causa:
+
+1. **Convergência sadia.** best_epoch=45, parou por platô (patience), não por
+   budget. V0 convergia em 47–112. Não é convergência lenta.
+2. **Score head ranqueia.** `val_rank`≈1.0–1.4 durante todo o treino (chance=2.5;
+   <2.3 = ranqueia). No best: rank 1.27, top1≈52 vs chance≈128 (~2.5× melhor que a
+   média). **Não é colapso de modo.**
+3. **Calibração razoável.** Scores das predições: max-score médio 0.402, mediana
+   0.365 (K=6; uniforme=0.167). Sub-confiante moderado, mas longe do achatamento
+   (~0.20) que explicaria a queda sozinho. Causa no máximo **parcial**.
+4. **Atenção viva — o teste decisivo.** Forward com-vs-sem vizinhos no mesmo
+   checkpoint (mascarando os vizinhos): **|Δtraj| = 1.427 m** numa amostra com 3
+   vizinhos. Os vizinhos chegam às heads e movem a predição em >1 m. **Não é
+   atenção morta / bug de plumbing.**
+
+**Causa real (localizada por breakdown):** o mAP morre nos horizontes **longos**.
+mAP a 3s ok (VEHICLE_5=0.095, CYCLIST_5=0.100, comparável ao V0); a 8s despenca
+(VEHICLE_15=0.025, CYCLIST_15=0.016). Isso segue o MissRate a 8s altíssimo
+(VEHICLE_15=0.74, CYCLIST_15=0.84): quando quase tudo é "miss", não há
+verdadeiros-positivos para ranquear e o mAP colapsa. **E o V1 NÃO moveu o
+MissRate agregado** (0.625 vs V0-raw 0.615) — que era a hipótese central do V1.
+
+**Enquadramento (reportável SE a grade confirmar).** O V1-raw seed0 diz,
+honestamente: **agentes vizinhos sem mapa movem a trajetória (Δ=1.43 m real) mas
+não bastam para fechar a cobertura a longo horizonte.** O mAP baixo é o *sintoma
+agregado* disso, não um artefato. Se a grade confirmar, **fortalece a motivação do
+V2 (mapa)** e é a ponte lógica: "isolamos o contexto social, medimos, não basta
+para a cobertura longa → o próximo degrau é o mapa". O **Δ=1.43 m é a evidência a
+guardar para a escrita** — separa "social não ajuda" de "social bugado" (revisores
+vão querer essa distinção).
+
+**Disciplina (o que NÃO fazer):** não rerodar o seed0 "pra ver se melhora" (o
+número é informação, não erro); não ajustar `cls_weight`/temperatura com base em 1
+seed (qualquer ajuste é sub-experimento MEDIDO e ROTULADO, feito DEPOIS da grade
+confirmar a queda). O "cls_weight indistinguível" valia **no V0** e NÃO transfere
+automaticamente pro V1 (a fusão mudou a escala do embedding que chega às heads).
+
+**Pendências para fechar o degrau:** (1) escrever os 3 siblings de orquestração da
+grade (`run_grid_gpu_social`, `run_grid_validate_social`,
+`consolidate_seeds_social`); (2) rodar a grade `{raw,std}×8` e consolidar; (3)
+baseline de velocidade constante (o "chão" verdadeiro, pendência antiga) antes de
+reportar em absoluto.
 
 ---
 
