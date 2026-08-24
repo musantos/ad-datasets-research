@@ -395,13 +395,20 @@ consolidados já existem; a conclusão qualitativa NÃO depende disso.
 
 ---
 
-### 0.11. V1 — contexto social (cross-attention) *(22/ago/2026)* — DIAGNÓSTICO EM ANDAMENTO
+### 0.11. V1 — contexto social (cross-attention) *(22–24/ago/2026)* — fecha o V1
 
-> **Status: degrau NÃO fechado.** Apenas o **seed0 (raw)** foi medido — vale para
-> validar o pipeline, **não** para concluir sobre o efeito social. A grade de 8
-> seeds (`{raw,std}×8`) é o que decide, e está **pendente** (junto dos 3 scripts
-> de orquestração da grade). Os números abaixo são diagnóstico de 1 seed, com a
-> ressalva "seeds before conclusions". Não promover a resultado final.
+> **Status: degrau FECHADO.** Grade completa `{raw,std}×8 = 16 runs` rodada,
+> consolidada e reportada em `results/consolidated_2026-08-24_0846/report.csv`
+> (16 runs, todos `vectorized_social`; report isolado só da grade V1). Pipeline
+> validado ponta-a-ponta: treino → inferência → métricas oficiais → report. Custo
+> real medido pela coluna `total_time_s`: ~**2.1 min/run**, ~**0.6 h** a grade
+> inteira (modelo de ~97k params). Os dois problemas encontrados no fechamento
+> eram **operacionais**, não bug de código (os 3 scripts de consolidação estavam
+> corretos): (A) `metrics_all.csv`/`train_summary.csv` do V0 parados na pasta do
+> V1 → regenerar com `--model social` em pasta datada limpa; (B) glob de GPU largo
+> pegando um `phase_index` de lançamento `itemC` errado → glob estrito à data/hora
+> da grade. Lição: o `[compat]` que defaulta silenciosamente vira armadilha —
+> preferir sempre glob estrito.
 
 Segundo degrau da Fase 2. Adiciona os **outros agentes** da cena como polylines +
 **cross-attention** do alvo sobre eles (primeira vez que atenção aparece na
@@ -418,7 +425,22 @@ seleção determinística top-K por `(distância@10, id)`, **K=16** fixo a prior
 NaN de softmax tudo-mascarado). **~97k params.** O cache atual **já guarda todos
 os agentes** da cena (`data['agents']`) → V1 não precisou reprocessar cache.
 
-**Seed0 (raw, cls20, K=16, at convergence) — média das 9 breakdowns vs âncoras V0:**
+**Vereditos da grade (16 seeds, at convergence):**
+
+1. **std↔raw indistinguíveis.** Todos os Δ entre variantes < 1σ — mesmo padrão do
+   V0 (§0.10) e do `cls_weight`. → **NÃO reportar std como vitória no V1;** é
+   ruído, não incremento.
+2. **Cobertura a 8s não fecha.** No horizonte longo, MissRate≈0.74 e mAP≈0.04: os
+   agentes vizinhos **sem mapa** movem a trajetória mas não fecham a cobertura a
+   longo horizonte. Resultado científico, **não bug** → motiva o **V2 (mapa)**.
+
+<!-- TODO: preencher a tabela agregada mean±std (estilo §0.10) a partir do
+     report.csv real (results/consolidated_2026-08-24_0846/report.csv). Não
+     reconstruir de memória. -->
+
+**Diagnóstico seed0 (raw, cls20, K=16) — confirmado pela grade.** A tabela abaixo é
+o seed0 raw que validou o pipeline; a grade de 16 seeds confirmou o padrão (mAP
+baixo por cobertura longa, não por bug). Média das 9 breakdowns vs âncoras V0:
 
 | métrica | V1-social seed0 (raw) | V0-raw (8 seeds) | flatten-agente |
 |---|---|---|---|
@@ -453,26 +475,26 @@ mAP a 3s ok (VEHICLE_5=0.095, CYCLIST_5=0.100, comparável ao V0); a 8s despenca
 verdadeiros-positivos para ranquear e o mAP colapsa. **E o V1 NÃO moveu o
 MissRate agregado** (0.625 vs V0-raw 0.615) — que era a hipótese central do V1.
 
-**Enquadramento (reportável SE a grade confirmar).** O V1-raw seed0 diz,
-honestamente: **agentes vizinhos sem mapa movem a trajetória (Δ=1.43 m real) mas
-não bastam para fechar a cobertura a longo horizonte.** O mAP baixo é o *sintoma
-agregado* disso, não um artefato. Se a grade confirmar, **fortalece a motivação do
-V2 (mapa)** e é a ponte lógica: "isolamos o contexto social, medimos, não basta
-para a cobertura longa → o próximo degrau é o mapa". O **Δ=1.43 m é a evidência a
-guardar para a escrita** — separa "social não ajuda" de "social bugado" (revisores
-vão querer essa distinção).
+**Enquadramento (reportável — grade confirmou).** O V1 diz, honestamente:
+**agentes vizinhos sem mapa movem a trajetória (Δ=1.43 m real) mas não bastam para
+fechar a cobertura a longo horizonte.** O mAP baixo é o *sintoma agregado* disso,
+não um artefato. Isso **fortalece a motivação do V2 (mapa)** e é a ponte lógica:
+"isolamos o contexto social, medimos, não basta para a cobertura longa → o próximo
+degrau é o mapa". O **Δ=1.43 m é a evidência a guardar para a escrita** — separa
+"social não ajuda" de "social bugado" (revisores vão querer essa distinção).
 
-**Disciplina (o que NÃO fazer):** não rerodar o seed0 "pra ver se melhora" (o
-número é informação, não erro); não ajustar `cls_weight`/temperatura com base em 1
-seed (qualquer ajuste é sub-experimento MEDIDO e ROTULADO, feito DEPOIS da grade
-confirmar a queda). O "cls_weight indistinguível" valia **no V0** e NÃO transfere
-automaticamente pro V1 (a fusão mudou a escala do embedding que chega às heads).
+**Disciplina (o que NÃO fazer):** não rerodar seeds "pra ver se melhora" (o número
+é informação, não erro); não ajustar `cls_weight`/temperatura post-hoc (qualquer
+ajuste é sub-experimento MEDIDO e ROTULADO). O "cls_weight indistinguível" valia
+**no V0** e NÃO transfere automaticamente pro V1 (a fusão mudou a escala do
+embedding que chega às heads) — mas a grade confirmou que std↔raw também é ruído
+aqui.
 
-**Pendências para fechar o degrau:** (1) escrever os 3 siblings de orquestração da
-grade (`run_grid_gpu_social`, `run_grid_validate_social`,
-`consolidate_seeds_social`); (2) rodar a grade `{raw,std}×8` e consolidar; (3)
-baseline de velocidade constante (o "chão" verdadeiro, pendência antiga) antes de
-reportar em absoluto.
+**Pendências (não bloqueiam o V2):** (1) preencher a tabela agregada mean±std do
+report.csv; (2) baseline de velocidade constante (o "chão" verdadeiro, pendência
+antiga) antes de reportar em absoluto; (3) opcional: re-treinar seed0_raw dentro
+da grade para ganhar telemetria de GPU (1 célula `energy_wh` vazia legítima —
+métricas presentes).
 
 ---
 
