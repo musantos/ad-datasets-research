@@ -41,11 +41,24 @@ MODELS_CFG = {
 
 CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed
 
-PRED_ROOT = "/workspace/datasets/waymo/predictions"
+PRED_ROOT = os.environ.get("PRED_ROOT", "/workspace/datasets/waymo/predictions")
 VALIDATE_MODULE = "src.motion.validate_motion_official"
 METRICS_DIR = os.environ.get("METRICS_DIR", "/workspace/results")
 
 PYEXE = sys.executable or "python3"
+
+
+def apply_run_id(run_id):
+    """Nest PRED_ROOT (read from) and METRICS_DIR (written to) under
+    runs/<run_id>, and EXPORT METRICS_DIR so the validate_motion_official child
+    (subprocess) writes its CSV into the run -- its default_csv_path honors
+    METRICS_DIR. This container is separate (CPU/TF), so the run-id is carried
+    by hand from the GPU echo; run-id is a layer ABOVE run_tag (folder names and
+    the skip glob are unchanged, just relocated under runs/<id>)."""
+    global PRED_ROOT, METRICS_DIR
+    PRED_ROOT = os.path.join(PRED_ROOT, "runs", run_id)
+    METRICS_DIR = os.path.join(METRICS_DIR, "runs", run_id)
+    os.environ["METRICS_DIR"] = METRICS_DIR
 
 
 def run_tag(cls, arm, seed, variant):
@@ -66,12 +79,21 @@ def metrics_glob(folder, cls, arm, seed, variant):
 def main():
     ap = argparse.ArgumentParser(description="Generic metrics grid (validate).")
     ap.add_argument("--model", required=True, choices=sorted(MODELS_CFG))
+    ap.add_argument("--run-id", required=True,
+                    help="grid run-id (REQUIRED). Copy it verbatim from the GPU "
+                         "phase echo; resolves predictions/<...>/runs/<id> and "
+                         "results/runs/<id>. The id crosses containers by hand.")
     ap.add_argument("--cls-weights", default=str(CLS_WEIGHT_DEFAULT),
                     help="weight(s): a single value (default) or list '1,20,50'. "
                          "MUST match the weights run in the GPU phase.")
     ap.add_argument("--seeds", default="0-7",
                     help="seeds: '0-7' (range) or '0,1,2' (list). Default 0-7.")
     args = ap.parse_args()
+
+    apply_run_id(args.run_id)
+    print(f"[run-id] {args.run_id}")
+    print(f"         predictions <- {PRED_ROOT}")
+    print(f"         metrics     -> {METRICS_DIR}")
 
     cfg = MODELS_CFG[args.model]
     cls_weights = [float(w) for w in args.cls_weights.split(",") if w.strip() != ""]
@@ -120,7 +142,7 @@ def main():
         print(f"       {len(missing_preds)} combos had no predictions: {missing_preds}")
     print(f"\nMetrics CSVs in: {METRICS_DIR}")
     print(f"Consolidate: python3 consolidate_seeds.py --model {args.model} "
-          f"--cls-weights {args.cls_weights} --results-dir {METRICS_DIR}")
+          f"--cls-weights {args.cls_weights} --run-id {args.run_id}")
 
 
 if __name__ == "__main__":

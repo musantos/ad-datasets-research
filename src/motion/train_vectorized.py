@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import csv
 import random
@@ -44,11 +45,11 @@ VAL_CACHE = "/workspace/datasets/waymo/cache_val"
 
 # Root of the checkpoints. The final folder includes the cls_weight AND the
 # grid arm (sdc/agent), so sweep runs never overwrite each other.
-CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
+CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
 
 # Root of the per-epoch training logs (one CSV per run, named by
 # model + cls_weight + arm + seed + timestamp so runs never overwrite).
-LOG_ROOT = "/workspace/experiments/logs"
+LOG_ROOT = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
 
 # V0-std: stats de feature congeladas (mean/std por-canal do cache_train),
 # geradas UMA vez por compute_feature_stats.py. Carregadas para os buffers do
@@ -184,16 +185,16 @@ def train(cls_weight, agent_centric, seed=None, standardize=False,
             VAL_CACHE, agent_centric=agent_centric, features=FEATURES)
     except Exception as e:
         print(f"[ERROR] Failed to load dataset: {e}")
-        return
+        sys.exit(1)
 
     if len(train_dataset) == 0:
         print(f"[ERROR] Empty training cache: {TRAIN_CACHE}")
-        return
+        sys.exit(1)
     if len(val_dataset) == 0:
         print(f"[ERROR] Empty validation cache: {VAL_CACHE}")
         print("       Run first, in the METRICS container:")
         print("       python3 -m src.core.waymo_preprocessor --split validation --shards 0,1,2")
-        return
+        sys.exit(1)
 
     n_features = train_dataset.n_features
     print(f"[OK] Training (official 'training' split):      {len(train_dataset)} examples")
@@ -219,9 +220,9 @@ def train(cls_weight, agent_centric, seed=None, standardize=False,
     # identidade (0/1) -> entrada crua, idêntica ao V0-raw.
     if standardize:
         if not os.path.exists(stats_path):
-            print(f"[ERROR] --standardize pediu stats mas o arquivo não existe: {stats_path}")
-            print("        Gere-o UMA vez com: python3 -m src.motion.compute_feature_stats")
-            return
+            print(f"[ERROR] --standardize asked for stats but the file is missing: {stats_path}")
+            print("        Generate it ONCE with: python3 -m src.motion.compute_feature_stats")
+            sys.exit(1)
         model.load_feature_stats(stats_path)
         fm = model.feat_mean.detach().cpu().tolist()
         fs = model.feat_std.detach().cpu().tolist()

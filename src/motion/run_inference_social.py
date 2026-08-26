@@ -1,31 +1,32 @@
 import os
+import sys
 import argparse
 from collections import defaultdict
 
 import numpy as np
 import torch
 
-# SIBLING de run_inference_vectorized (V1 = social). Mudanças vs V0, mecânicas:
-#   (1) dataset/model sociais;  (2) input do modelo = alvo + vizinhos + máscara;
+# SIBLING of run_inference_vectorized (V1 = social). Changes vs V0, mechanical:
+#   (1) social dataset/model;  (2) model input = target + neighbors + mask;
 #   (3) flag --n-neighbors (MUST match training).
-# A INVERSÃO agente->SDC é IDÊNTICA: os vizinhos são só ENTRADA; a saída segue
-# no frame agente do ALVO e volta pra SDC com a pose@10 do alvo, exatamente
-# como no V0.
+# The agent->SDC INVERSION is IDENTICAL: neighbors are ONLY input; the output stays
+# in the TARGET's agent frame and is inverted back to SDC with the target's pose@10,
+# exactly as in V0.
 from src.motion.vectorized_social_model import VectorizedSocialTrajectoryPredictor
 from src.core.waymo_pytorch_dataset_social import WaymoMotionDatasetSocial
 from src.core.waymo_pytorch_dataset_agentcentric import (
     WaymoMotionDatasetAgentCentric, ANCHOR_FRAME, FS_X, FS_Y, FS_HEADING,
 )
 
-# RODAR NO CONTAINER GPU.
+# RUN THIS SCRIPT IN THE GPU CONTAINER.
 
 NUM_MODES = 6
 N_NEIGHBORS = 16
 FEATURES = ("x", "y", "heading", "vx", "vy")
 
 CACHE_DIR = "/workspace/datasets/waymo/cache_val"
-CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
-PRED_ROOT = "/workspace/datasets/waymo/predictions"
+CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
+PRED_ROOT = os.environ.get("PRED_ROOT", "/workspace/datasets/waymo/predictions")
 
 MODEL_NAME = "vectorized_social"
 CHECKPOINT_NAME = "social_best.pth"
@@ -34,14 +35,14 @@ CHECKPOINT_NAME = "social_best.pth"
 def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS):
     """
     tag:         experiment identifier, e.g. 'cls20'.
-    seed:        seleciona a pasta ..._seed<n>, casando o train.
-    standardize: seleciona o checkpoint _std. As stats vêm dos BUFFERS do
-                 checkpoint (load_state_dict); este flag só compõe o path.
-    n_neighbors: MUST match training. A seleção top-K muda a distribuição de
-                 vizinhos vista pelo modelo -> um K diferente do treino é
-                 mismatch train/inferência (degrada métricas silenciosamente).
+    seed:        selects the ..._seed<n> folder, matching train.
+    standardize: selects the _std checkpoint. The stats come from the checkpoint
+                 BUFFERS (load_state_dict); this flag only composes the path.
+    n_neighbors: MUST match training. The top-K selection changes the distribution
+                 of neighbors the model sees -> a K different from training is a
+                 train/inference mismatch (silently degrades metrics).
 
-    Braço agente-cêntrico é IMPLÍCITO no V1 (arm='agent'):
+    Agent-centric arm is IMPLICIT in V1 (arm='agent'):
         Checkpoint: checkpoints/vectorized_social_<tag>_agent[_seed<n>][_std]/social_best.pth
         Output:     predictions/vectorized_social_<tag>_agent[_seed<n>][_std]/
     """
@@ -59,7 +60,7 @@ def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS):
         print(f"[ERROR] Checkpoint not found: {checkpoint_path}")
         available = [d for d in os.listdir(CHECKPOINT_ROOT) if d.startswith(MODEL_NAME)]
         print(f"       Available folders: {sorted(available)}")
-        return
+        sys.exit(1)
 
     os.makedirs(pred_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,18 +69,18 @@ def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS):
         CACHE_DIR, n_neighbors=n_neighbors, features=FEATURES)
     if len(dataset) == 0:
         print(f"[ERROR] No target agents in validation cache: {CACHE_DIR}")
-        return
+        sys.exit(1)
     n_features = dataset.n_features
 
     model = VectorizedSocialTrajectoryPredictor(
         input_steps=11, output_steps=80, num_modes=NUM_MODES, n_features=n_features
     ).to(device)
 
-    # Load TOLERANTE dos buffers de padronização (mesma lógica do V0). Um
-    # checkpoint V1 SEMPRE tem os buffers (register_buffer no __init__), então
-    # o ramo 'missing' abaixo não dispara para o V1 -- mantido por consistência
-    # e defesa. cross_attn/attn_norm SÃO obrigatórios (treinados) e não podem
-    # faltar; se faltarem, é bug real e o guard levanta.
+    # TOLERANT load of the standardization buffers (same logic as V0). A V1
+    # checkpoint ALWAYS has the buffers (register_buffer in __init__), so the
+    # 'missing' branch below does not fire for V1 -- kept for consistency and
+    # defense. cross_attn/attn_norm ARE required (trained) and cannot be
+    # missing; if they are, it's a real bug and the guard raises.
     STD_BUFFERS = {"feat_mean", "feat_std"}
     res = model.load_state_dict(torch.load(checkpoint_path, map_location=device),
                                 strict=False)
@@ -87,17 +88,17 @@ def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS):
     unexpected = set(res.unexpected_keys)
     if not missing.issubset(STD_BUFFERS) or unexpected:
         raise RuntimeError(
-            f"checkpoint incompatível: missing={sorted(missing)} "
-            f"unexpected={sorted(unexpected)}. Só os buffers "
-            f"{sorted(STD_BUFFERS)} podem faltar, e nada pode sobrar."
+            f"incompatible checkpoint: missing={sorted(missing)} "
+            f"unexpected={sorted(unexpected)}. Only the buffers "
+            f"{sorted(STD_BUFFERS)} may be missing, and nothing may be extra."
         )
     if missing:
         if standardize:
             raise RuntimeError(
-                f"run --standardize mas o checkpoint não tem {sorted(missing)}: "
-                "stats de padronização perdidas. Abortando."
+                f"run --standardize but the checkpoint lacks {sorted(missing)}: "
+                "standardization stats lost. Aborting."
             )
-        print(f"[INFO] checkpoint sem buffers {sorted(missing)} -> identidade (raw).")
+        print(f"[INFO] checkpoint without buffers {sorted(missing)} -> identity (raw).")
     model.eval()
 
     by_file = defaultdict(list)
@@ -120,8 +121,8 @@ def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS):
 
             preds = {}
             for idx, aid in by_file[path]:
-                # Input montado pelo MESMO transform do dataset (paridade
-                # train/inferência por construção): alvo + vizinhos + máscara.
+                # Input built by the SAME dataset transform (train/inference
+                # parity by construction): target + neighbors + mask.
                 x_past, neighbors, nmask, _, _, _ = dataset[idx]
                 x_past = x_past.unsqueeze(0).to(device)       # [1,11,F]
                 neighbors = neighbors.unsqueeze(0).to(device)  # [1,K,11,F]
@@ -130,15 +131,15 @@ def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS):
                 traj_out, scores = model(x_past, neighbors, nmask)
                 traj = traj_out[0].cpu().numpy().astype(np.float64)  # [K,80,2] frame AGENTE
 
-                # INVERSÃO agente->SDC (IDÊNTICA ao V0): pose@10 do ALVO relida
-                # do mesmo cache; vizinhos não entram aqui.
+                # agent->SDC INVERSION (IDENTICAL to V0): target pose@10 re-read
+                # from the same cache; neighbors do not enter here.
                 #   forward:  xy_agent = (xy_sdc - p0) @ R.T
                 #   inverse:  xy_sdc   =  xy_agent      @ R  + p0
                 fs = np.asarray(agents_by_id[aid]['full_state'], dtype=np.float64)
                 p0 = fs[ANCHOR_FRAME, [FS_X, FS_Y]]
                 theta0 = float(fs[ANCHOR_FRAME, FS_HEADING])
                 R = WaymoMotionDatasetAgentCentric._rotation_neg(theta0)
-                traj = traj @ R + p0                          # [K,80,2] de volta em SDC
+                traj = traj @ R + p0                          # [K,80,2] back in SDC
 
                 probs = torch.softmax(scores, dim=1)
                 order = torch.argsort(probs[0], descending=True)
@@ -171,9 +172,9 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None,
                         help="RNG seed used at training; selects the run folder")
     parser.add_argument("--standardize", action="store_true",
-                        help="std: seleciona o checkpoint _std. MUST match training.")
+                        help="std: selects the _std checkpoint. MUST match training.")
     parser.add_argument("--n-neighbors", type=int, default=N_NEIGHBORS,
-                        help=f"K vizinhos (default: {N_NEIGHBORS}). MUST match training.")
+                        help=f"K neighbors (default: {N_NEIGHBORS}). MUST match training.")
     args = parser.parse_args()
 
     run_inference(tag=args.tag, seed=args.seed, standardize=args.standardize,

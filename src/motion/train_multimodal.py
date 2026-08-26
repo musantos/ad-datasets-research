@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import csv
 import random
@@ -44,11 +45,11 @@ VAL_CACHE = "/workspace/datasets/waymo/cache_val"
 
 # Root of the checkpoints. The final folder includes the cls_weight AND the
 # grid arm (sdc/agent), so sweep runs never overwrite each other.
-CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
+CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
 
 # Root of the per-epoch training logs (one CSV per run, named by
 # model + cls_weight + arm + seed + timestamp so runs never overwrite).
-LOG_ROOT = "/workspace/experiments/logs"
+LOG_ROOT = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
 
 
 def masked_mse_per_mode(outputs, targets, mask):
@@ -172,16 +173,16 @@ def train(cls_weight, agent_centric, seed=None):
             VAL_CACHE, agent_centric=agent_centric, features=FEATURES)
     except Exception as e:
         print(f"[ERROR] Failed to load dataset: {e}")
-        return
+        sys.exit(1)
 
     if len(train_dataset) == 0:
         print(f"[ERROR] Empty training cache: {TRAIN_CACHE}")
-        return
+        sys.exit(1)
     if len(val_dataset) == 0:
         print(f"[ERROR] Empty validation cache: {VAL_CACHE}")
         print("       Run first, in the METRICS container:")
         print("       python3 -m src.core.waymo_preprocessor --split validation --shards 0,1,2")
-        return
+        sys.exit(1)
 
     n_features = train_dataset.n_features
     print(f"[OK] Training (official 'training' split):      {len(train_dataset)} examples")

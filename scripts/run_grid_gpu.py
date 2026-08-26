@@ -35,9 +35,10 @@ import sys
 import time
 import csv
 import signal
+import secrets
 import argparse
 import subprocess
-from datetime import datetime
+from datetime import datetime, date
 
 # --- MODEL REGISTRY ----------------------------------------------------------
 # module        : module suffix -> src.motion.train_<module> / run_inference_<module>
@@ -81,9 +82,12 @@ MODELS_CFG = {
 CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed
 
 # --- paths (match train_*/run_inference_*) -----------------------------------
-CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
-PRED_ROOT = "/workspace/datasets/waymo/predictions"
-GPULOG_DIR = "/workspace/experiments/gpu_logs"
+# Env-override, default = today's value (same pattern as run_grid_validate's
+# METRICS_DIR). Without env AND without --run-id these stay at today's roots
+# (backward-compat). apply_run_id() nests them under runs/<run-id> at runtime.
+CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
+PRED_ROOT = os.environ.get("PRED_ROOT", "/workspace/datasets/waymo/predictions")
+GPULOG_DIR = os.environ.get("GPULOG_DIR", "/workspace/experiments/gpu_logs")
 NVIDIA_SMI_INTERVAL = 5          # seconds, matches your manual -l 5
 
 PYEXE = sys.executable or "python3"
@@ -95,6 +99,53 @@ _logfiles = []
 def ts():
     """Local wall-clock string matching nvidia-smi's format prefix."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def make_run_id(model):
+    """Grid run-id: <model>_<YYYY-MM-DD>_<hex4>. hex4 disambiguates same-day runs
+    of the same method. Generated ONCE per grid by this runner (leaves never
+    invent one)."""
+    return f"{model}_{date.today():%Y-%m-%d}_{secrets.token_hex(2)}"
+
+
+def apply_run_id(run_id):
+    """Nest the write-roots under runs/<run_id> and export them so the
+    train_*/run_inference_* children inherit the SAME location (subprocess env
+    inheritance). One mechanism: this runner builds sentinels/loggers from the
+    nested globals, the children write artifacts from the nested env -> both
+    co-located. The run-id NESTS under each root; it never moves the root
+    (roots live on different disks). *_CACHE and STATS_PATH stay OUTSIDE the
+    run-id (input / shared) and are not touched here."""
+    global CHECKPOINT_ROOT, PRED_ROOT, GPULOG_DIR
+    CHECKPOINT_ROOT = os.path.join(CHECKPOINT_ROOT, "runs", run_id)
+    PRED_ROOT = os.path.join(PRED_ROOT, "runs", run_id)
+    GPULOG_DIR = os.path.join(GPULOG_DIR, "runs", run_id)
+    os.environ["CHECKPOINT_ROOT"] = CHECKPOINT_ROOT
+    os.environ["PRED_ROOT"] = PRED_ROOT
+    os.environ["GPULOG_DIR"] = GPULOG_DIR
+    # LOG_ROOT is written by the train_* children, not by this runner, so it is
+    # not a global here; still export it (nested under its own default root) so
+    # the per-epoch CSVs land inside the run too.
+    log_root = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
+    os.environ["LOG_ROOT"] = os.path.join(log_root, "runs", run_id)
+
+
+def write_run_txt(run_id, cfg, cls_weights, seeds, model):
+    """One run.txt per grid, written at the start under GPULOG_DIR (experiments
+    side, guaranteed writable by the GPU runner). Minimal provenance; per-seed
+    timestamps already live in logs/*.csv and phase_index_*.csv, not duplicated."""
+    path = os.path.join(GPULOG_DIR, "run.txt")
+    with open(path, "w") as f:
+        f.write(f"run_id      : {run_id}\n")
+        f.write(f"model       : {model}  (folder={cfg['folder']})\n")
+        f.write(f"opened_at   : {ts()}\n")
+        f.write(f"cls_weights : {cls_weights}\n")
+        f.write(f"seeds       : {seeds[0]}..{seeds[-1]}\n")
+        f.write(f"arms        : {cfg['arms']}\n")
+        f.write(f"variants    : {cfg['variants']}\n")
+        f.write(f"extra_train : {' '.join(cfg['extra_train'])}\n")
+        f.write(f"argv        : {' '.join(sys.argv)}\n")
+    print(f"[run.txt] {path}")
 
 
 def start_gpu_loggers():
@@ -252,6 +303,11 @@ def main():
                     help="seeds: '0-7' (range) or '0,1,2' (list). Default 0-7.")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the commands and paths without executing (for review).")
+    ap.add_argument("--run-id", default=None,
+                    help="grid run-id for isolation. Passed -> used verbatim "
+                         "(resume). Absent + real run -> auto-generated "
+                         "(<model>_<date>_<hex4>). Absent + --dry-run -> today's "
+                         "roots (backward-compat), no runs/<id> nesting.")
     args = ap.parse_args()
 
     cfg = MODELS_CFG[args.model]
@@ -266,10 +322,24 @@ def main():
         seeds = [int(s) for s in args.seeds.split(",") if s.strip() != ""]
 
     if args.dry_run:
+        # Nest only when a run-id is EXPLICIT; without one, preview today's roots
+        # (backward-compat proof, smoke §9.2). Real runs auto-generate below.
+        if args.run_id:
+            apply_run_id(args.run_id)
         dry_run(cfg, cls_weights, seeds)
         return
 
+    # Real run: resolve the run-id (generate if absent) and nest BEFORE anything
+    # writes. Children inherit the nested roots via subprocess env inheritance.
+    run_id = args.run_id or make_run_id(args.model)
+    apply_run_id(run_id)
+    print(f"[run-id] {run_id}")
+    print(f"         checkpoints -> {CHECKPOINT_ROOT}")
+    print(f"         predictions -> {PRED_ROOT}")
+    print(f"         gpu_logs    -> {GPULOG_DIR}")
+
     os.makedirs(GPULOG_DIR, exist_ok=True)
+    write_run_txt(run_id, cfg, cls_weights, seeds, args.model)
     state_path, procs_path = start_gpu_loggers()
 
     def _cleanup(signum=None, frame=None):
@@ -327,7 +397,7 @@ def main():
         print(f"       GPU state:   {state_path}")
         print(f"       GPU procs:   {procs_path}")
     print("\nNext, in the METRICS container (CPU/TF):")
-    print(f"       python3 run_grid_validate.py --model {args.model}")
+    print(f"       python3 run_grid_validate.py --model {args.model} --run-id {run_id}")
 
 
 if __name__ == "__main__":

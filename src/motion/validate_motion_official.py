@@ -188,12 +188,18 @@ def detect_n_modes(pred_dir, files):
 def default_csv_path(pred_dir):
     """
     Build a default CSV path so that different runs do not overwrite each
-    other: results/metrics_<tag>_<YYYY-MM-DD>.csv, where <tag> is the name
-    of the predictions folder (e.g. 'baseline', 'multimodal_cls20').
+    other: <METRICS_DIR>/metrics_<tag>_<YYYY-MM-DD>.csv, where <tag> is the
+    name of the predictions folder (e.g. 'baseline', 'multimodal_cls20').
+
+    METRICS_DIR (env) lets the grid route the CSV into the current run
+    (results/runs/<run-id>) -- same env-inheritance mechanism as the GPU
+    phase. Default 'results' (relative) preserves the standalone behavior
+    when run from /workspace with no env set.
     """
     tag = os.path.basename(os.path.normpath(pred_dir))
     date = datetime.date.today().isoformat()
-    return os.path.join("results", f"metrics_{tag}_{date}.csv")
+    metrics_dir = os.environ.get("METRICS_DIR", "results")
+    return os.path.join(metrics_dir, f"metrics_{tag}_{date}.csv")
 
 
 def write_metrics_csv(csv_path, pred_dir, kind, metric_names,

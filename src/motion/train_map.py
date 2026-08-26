@@ -11,13 +11,16 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-# SIBLING de train_vectorized (V1 = social). Mudanças vs V0, TODAS mecânicas:
-#   (1) dataset/model sociais;  (2) batch de 6 campos (neighbors + nmask);
-#   (3) model(history, neighbors, nmask);  (4) flag --n-neighbors.
-# A CIÊNCIA é intacta: mesma WTA, best=Val(best mode), patience, cls_weight,
-# BATCH_SIZE=64, LR, split oficial. Braço agente-cêntrico é IMPLÍCITO no V1.
-from src.core.waymo_pytorch_dataset_social import WaymoMotionDatasetSocial
-from src.motion.vectorized_social_model import VectorizedSocialTrajectoryPredictor
+# SIBLING of train_social (V2 = social + map). Changes vs V1, ALL mechanical:
+#   (1) map dataset/model;  (2) 9-tuple batch (map_polylines/map_type/map_mask);
+#   (3) model(history, neighbors, nmask, map_polylines, map_type, map_mask);
+#   (4) flags --n-map-polylines / --n-points-per-polyline / --use-map-type.
+# The SCIENCE is intact: same WTA, best=Val(best mode), patience, cls_weight,
+# BATCH_SIZE=64, LR, official split. Agent-centric arm is IMPLICIT (as in V1).
+# V2 runs raw-only (see MODELS_CFG variants=["raw"]); --standardize is kept for
+# sibling parity but is not used by the grid.
+from src.core.waymo_pytorch_dataset_map import WaymoMotionDatasetMap
+from src.motion.vectorized_social_map_model import VectorizedSocialMapTrajectoryPredictor
 
 OBJECT_TYPE_NAMES = {0: "UNSET", 1: "VEHICLE", 2: "PEDESTRIAN", 3: "CYCLIST", 4: "OTHER"}
 
@@ -26,23 +29,25 @@ EPOCHS = 300
 PATIENCE = 10
 BATCH_SIZE = 64
 LR = 1e-3
-N_NEIGHBORS = 16          # K fixo a priori (calibrado empiricamente no smoke do dataset)
+N_NEIGHBORS = 16              # K fixed a priori (social branch), == V1
+N_MAP_POLYLINES = 128         # M fixed a priori (calibrated on cache_val_map smoke)
+N_POINTS_PER_POLYLINE = 20    # Np fixed a priori (idem)
 
 FEATURES = ("x", "y", "heading", "vx", "vy")
 
-TRAIN_CACHE = "/workspace/datasets/waymo/cache_train"
-VAL_CACHE = "/workspace/datasets/waymo/cache_val"
+TRAIN_CACHE = "/workspace/datasets/waymo/cache_train_map"
+VAL_CACHE = "/workspace/datasets/waymo/cache_val_map"
 
 CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
 LOG_ROOT = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
 STATS_PATH = "/workspace/experiments/feature_stats.npy"
 
-MODEL_NAME = "vectorized_social"      # prefixo de pasta/log (não colide com V0)
-CHECKPOINT_NAME = "social_best.pth"   # nome do checkpoint dentro da pasta
+MODEL_NAME = "vectorized_social_map"   # folder/log prefix (does not collide with V0/V1)
+CHECKPOINT_NAME = "map_best.pth"        # checkpoint name inside the folder
 
 
 def masked_mse_per_mode(outputs, targets, mask):
-    """MSE mascarado de CADA modo, por exemplo do batch. [B,K]. Idêntico ao V0."""
+    """Masked MSE of EACH mode, per batch example. [B,K]. Same as V0/V1."""
     targets = targets.unsqueeze(1)                 # [B,1,80,2]
     mask_exp = mask.unsqueeze(1).unsqueeze(-1)     # [B,1,80,1]
     diff2 = (outputs - targets) ** 2
@@ -53,7 +58,7 @@ def masked_mse_per_mode(outputs, targets, mask):
 
 
 def wta_loss(outputs, scores, targets, mask, cls_weight):
-    """Winner-Takes-All + cross-entropy do modo vencedor. Idêntico ao V0."""
+    """Winner-Takes-All + cross-entropy of the winning mode. Same as V0/V1."""
     per_mode = masked_mse_per_mode(outputs, targets, mask)       # [B,K]
     best_idx = per_mode.argmin(dim=1)                            # [B]
     reg = per_mode.gather(1, best_idx.unsqueeze(1)).squeeze(1)
@@ -71,7 +76,8 @@ def wta_loss(outputs, scores, targets, mask, cls_weight):
 
 
 def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
-          n_neighbors=N_NEIGHBORS):
+          n_neighbors=N_NEIGHBORS, n_map_polylines=N_MAP_POLYLINES,
+          n_points_per_polyline=N_POINTS_PER_POLYLINE, use_map_type=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if seed is not None:
@@ -80,28 +86,37 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    # Braço agente-cêntrico é implícito no V1 -> arm fixo em "agent". O run_tag
-    # segue o MESMO formato do V0 (cls<w>_agent_seed<s>[_std]) para reaproveitar
-    # a lógica de grade/sentinela; só o PREFIXO de modelo muda (vectorized_social).
+    # Agent-centric arm is implicit in V2 -> arm fixed to "agent". run_tag follows
+    # the SAME format as V0/V1 (cls<w>_agent_seed<s>[_std]) to reuse the grid /
+    # sentinel logic; only the model PREFIX changes (vectorized_social_map).
+    # The _type suffix guards against overwriting a geometry checkpoint with a
+    # V2+type run; the pure-geometry grid never sets it. NOTE: the V2+type GRID
+    # (a separate MODELS_CFG entry) and the consolidation regex extension for a
+    # _type suffix are future work (see §7 of the transition).
     arm = "agent"
     tag = f"cls{cls_weight:g}_{arm}"
     run_tag = tag if seed is None else f"{tag}_seed{seed}"
     if standardize:
         run_tag = f"{run_tag}_std"
+    if use_map_type:
+        run_tag = f"{run_tag}_type"
     checkpoint_dir = os.path.join(CHECKPOINT_ROOT, f"{MODEL_NAME}_{run_tag}")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     print("=" * 78)
     gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (no GPU)"
-    print(f"[*] SOCIAL TRAINING (K={NUM_MODES}, cls_weight={cls_weight}, arm={arm}, "
-          f"n_neighbors={n_neighbors}) ON: {gpu_name}")
+    print(f"[*] MAP (social+map) TRAINING (K={NUM_MODES}, cls_weight={cls_weight}, "
+          f"arm={arm}, n_neighbors={n_neighbors}, M={n_map_polylines}, "
+          f"Np={n_points_per_polyline}, use_map_type={use_map_type}) ON: {gpu_name}")
     print("=" * 78)
 
     try:
-        train_dataset = WaymoMotionDatasetSocial(
-            TRAIN_CACHE, n_neighbors=n_neighbors, features=FEATURES)
-        val_dataset = WaymoMotionDatasetSocial(
-            VAL_CACHE, n_neighbors=n_neighbors, features=FEATURES)
+        train_dataset = WaymoMotionDatasetMap(
+            TRAIN_CACHE, n_neighbors=n_neighbors, n_map_polylines=n_map_polylines,
+            n_points_per_polyline=n_points_per_polyline, features=FEATURES)
+        val_dataset = WaymoMotionDatasetMap(
+            VAL_CACHE, n_neighbors=n_neighbors, n_map_polylines=n_map_polylines,
+            n_points_per_polyline=n_points_per_polyline, features=FEATURES)
     except Exception as e:
         print(f"[ERROR] Failed to load dataset: {e}")
         sys.exit(1)
@@ -116,15 +131,17 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
     n_features = train_dataset.n_features
     print(f"[OK] Training examples:   {len(train_dataset)}")
     print(f"[OK] Validation examples: {len(val_dataset)}")
-    print(f"[OK] Features {FEATURES} -> n_features={n_features} | n_neighbors={n_neighbors}")
+    print(f"[OK] Features {FEATURES} -> n_features={n_features} | n_neighbors={n_neighbors} "
+          f"| M={n_map_polylines} | Np={n_points_per_polyline}")
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=8, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
                             num_workers=8, pin_memory=True, persistent_workers=True)
 
-    model = VectorizedSocialTrajectoryPredictor(
-        input_steps=11, output_steps=80, num_modes=NUM_MODES, n_features=n_features
+    model = VectorizedSocialMapTrajectoryPredictor(
+        input_steps=11, output_steps=80, num_modes=NUM_MODES, n_features=n_features,
+        use_map_type=use_map_type
     ).to(device)
 
     if standardize:
@@ -135,14 +152,14 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
         model.load_feature_stats(stats_path)
         fm = model.feat_mean.detach().cpu().tolist()
         fs = model.feat_std.detach().cpu().tolist()
-        print(f"[OK] Padronização ATIVA (std). stats: {stats_path}")
-        print(f"     mean/canal = {[round(v,3) for v in fm]}")
-        print(f"     std /canal = {[round(v,3) for v in fs]}  (canais 2,3=sin,cos passthrough)")
+        print(f"[OK] Standardization ON (std). stats: {stats_path}")
+        print(f"     mean/channel = {[round(v,3) for v in fm]}")
+        print(f"     std /channel = {[round(v,3) for v in fs]}  (channels 2,3=sin,cos passthrough)")
     else:
-        print("[OK] Padronização OFF (raw): entrada crua, buffers identidade.")
+        print("[OK] Standardization OFF (raw): raw input, identity buffers.")
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[OK] Social model: {n_params:,} parameters")
+    print(f"[OK] Social+map model: {n_params:,} parameters")
     print(f"[OK] Checkpoints in: {checkpoint_dir}")
     if seed is not None:
         print(f"[OK] Seed: {seed}")
@@ -157,7 +174,10 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
     log_path = os.path.join(LOG_ROOT, f"{MODEL_NAME}_{run_tag}_{stamp}.csv")
     log_file = open(log_path, "w", newline="")
     log_file.write(f"# model={MODEL_NAME},cls_weight={cls_weight},arm={arm},"
-                   f"n_features={n_features},n_neighbors={n_neighbors},seed={seed},"
+                   f"n_features={n_features},n_neighbors={n_neighbors},"
+                   f"n_map_polylines={n_map_polylines},"
+                   f"n_points_per_polyline={n_points_per_polyline},"
+                   f"use_map_type={int(use_map_type)},seed={seed},"
                    f"standardize={int(standardize)},checkpoint_dir={checkpoint_dir}\n")
     log_writer = csv.writer(log_file)
     log_writer.writerow([
@@ -177,15 +197,20 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
         train_count = 0
         start_time = time.time()
 
-        for history, neighbors, nmask, future_gt, future_mask, agent_type in train_loader:
+        for (history, neighbors, nmask, map_polylines, map_type, map_mask,
+             future_gt, future_mask, agent_type) in train_loader:
             history = history.to(device)
             neighbors = neighbors.to(device)
             nmask = nmask.to(device)
+            map_polylines = map_polylines.to(device)
+            map_type = map_type.to(device)
+            map_mask = map_mask.to(device)
             future_gt = future_gt.to(device)
             future_mask = future_mask.to(device)
 
             optimizer.zero_grad()
-            outputs, scores = model(history, neighbors, nmask)
+            outputs, scores = model(history, neighbors, nmask,
+                                    map_polylines, map_type, map_mask)
 
             out = wta_loss(outputs, scores, future_gt, future_mask, cls_weight)
             loss = out["total"].mean()
@@ -205,14 +230,19 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
         mode_usage = [0] * NUM_MODES
 
         with torch.no_grad():
-            for history, neighbors, nmask, future_gt, future_mask, agent_type in val_loader:
+            for (history, neighbors, nmask, map_polylines, map_type, map_mask,
+                 future_gt, future_mask, agent_type) in val_loader:
                 history = history.to(device)
                 neighbors = neighbors.to(device)
                 nmask = nmask.to(device)
+                map_polylines = map_polylines.to(device)
+                map_type = map_type.to(device)
+                map_mask = map_mask.to(device)
                 future_gt = future_gt.to(device)
                 future_mask = future_mask.to(device)
 
-                outputs, scores = model(history, neighbors, nmask)
+                outputs, scores = model(history, neighbors, nmask,
+                                        map_polylines, map_type, map_mask)
                 out = wta_loss(outputs, scores, future_gt, future_mask, cls_weight)
 
                 for k in sums:
@@ -289,7 +319,7 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
     log_file.close()
 
     total_time = time.time() - train_start
-    print(f"\n[SUCCESS] Social training finished (cls_weight={cls_weight}, arm={arm}).")
+    print(f"\n[SUCCESS] Social+map training finished (cls_weight={cls_weight}, arm={arm}).")
     print(f"Best checkpoint: {CHECKPOINT_NAME} (epoch {best_epoch}, "
           f"Val best mode: {best_val_reg:.4f})")
     print(f"Time to best epoch: {best_cum_time:.1f}s | Total training time: {total_time:.1f}s")
@@ -299,23 +329,35 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Trains the vectorized+social K=6 model with Winner-Takes-All loss"
+        description="Trains the vectorized+social+map K=6 model with Winner-Takes-All loss"
     )
     parser.add_argument("--cls-weight", type=float, default=20.0,
                         help="weight of the classification term in the total loss")
     parser.add_argument("--seed", type=int, default=None,
                         help="RNG seed; also suffixes the run folder/log (..._seed<n>)")
     parser.add_argument("--standardize", action="store_true",
-                        help="std: padroniza a entrada (alvo E vizinhos) com stats "
-                             "congeladas do cache_train (sin/cos passthrough). Sufixa _std. "
-                             "Omitir = raw.")
+                        help="std: standardize the input (target AND neighbors) with "
+                             "frozen cache_train stats (sin/cos passthrough). Suffixes _std. "
+                             "Omit = raw. NOTE: V2 grid is raw-only; kept for parity.")
     parser.add_argument("--stats-path", default=STATS_PATH,
-                        help=f"caminho do .npy de stats (default: {STATS_PATH}). "
-                             "Só usado com --standardize.")
+                        help=f"path of the stats .npy (default: {STATS_PATH}). "
+                             "Only used with --standardize.")
     parser.add_argument("--n-neighbors", type=int, default=N_NEIGHBORS,
-                        help=f"K vizinhos mais próximos por alvo (default: {N_NEIGHBORS}). "
-                             "MUST match inference. Fixo a priori na grade.")
+                        help=f"K nearest neighbors per target (default: {N_NEIGHBORS}). "
+                             "MUST match inference. Fixed a priori in the grid.")
+    parser.add_argument("--n-map-polylines", type=int, default=N_MAP_POLYLINES,
+                        help=f"M nearest map polylines per target (default: {N_MAP_POLYLINES}). "
+                             "MUST match inference. Fixed a priori in the grid.")
+    parser.add_argument("--n-points-per-polyline", type=int, default=N_POINTS_PER_POLYLINE,
+                        help=f"Np points each polyline is resampled to (default: "
+                             f"{N_POINTS_PER_POLYLINE}). MUST match inference. Fixed a priori.")
+    parser.add_argument("--use-map-type", action="store_true",
+                        help="V2+type ablation: feed the 3-way entity type embedding. "
+                             "Suffixes _type. Default OFF = pure geometry (the V2 variable).")
     args = parser.parse_args()
 
     train(cls_weight=args.cls_weight, seed=args.seed, standardize=args.standardize,
-          stats_path=args.stats_path, n_neighbors=args.n_neighbors)
+          stats_path=args.stats_path, n_neighbors=args.n_neighbors,
+          n_map_polylines=args.n_map_polylines,
+          n_points_per_polyline=args.n_points_per_polyline,
+          use_map_type=args.use_map_type)
