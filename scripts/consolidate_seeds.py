@@ -28,6 +28,7 @@ No external dependencies (stdlib only). Runs in any container.
 
 import argparse
 import csv
+import os
 import re
 import sys
 from collections import defaultdict
@@ -45,6 +46,27 @@ MODELS_CFG = {
 }
 
 CLS_WEIGHT_DEFAULT = 20
+
+# Absolute roots (today's roots on their respective disks). --run-id resolves the
+# read/write dirs against these, matching apply_run_id in run_grid_validate.py.
+# The runners write into LOG_ROOT/runs/<id>, METRICS_DIR/runs/<id>; the
+# consolidator reads from the SAME place (write/read parity is the whole point).
+LOG_ROOT = "/workspace/experiments/logs"
+METRICS_DIR = "/workspace/results"
+
+
+def apply_run_id(run_id):
+    """Resolve the run-scoped dirs from --run-id against the absolute roots
+    (same convention as run_grid_validate.apply_run_id): logs and metrics live
+    under runs/<id>, and the consolidated output goes into
+    METRICS_DIR/runs/<id>/consolidated. run-id is a layer ABOVE run_tag; the
+    regex (anchored on the folder name) and file names are unchanged, just
+    relocated. Returns (logs_dir, results_dir, out_dir)."""
+    logs_dir = os.path.join(LOG_ROOT, "runs", run_id)
+    results_dir = os.path.join(METRICS_DIR, "runs", run_id)
+    out_dir = os.path.join(results_dir, "consolidated")
+    return logs_dir, results_dir, out_dir
+
 
 # OPTIONAL timestamp: tolerates date-only (2026-08-19) and date+time
 # (2026-08-19_07-54-08).
@@ -172,9 +194,19 @@ def parse_seeds(s):
 def main():
     ap = argparse.ArgumentParser(description="Generic per-seed consolidator.")
     ap.add_argument("--model", required=True, choices=sorted(MODELS_CFG))
-    ap.add_argument("--logs-dir", default="experiments/logs")
-    ap.add_argument("--results-dir", default="results")
-    ap.add_argument("--out-dir", default=".")
+    ap.add_argument("--run-id", required=True,
+                    help="grid run-id (REQUIRED). Resolves logs<-LOG_ROOT/runs/<id>, "
+                         "results<-METRICS_DIR/runs/<id>, out->results/consolidated. "
+                         "The --*-dir flags below OVERRIDE this when passed.")
+    ap.add_argument("--logs-dir", default=None,
+                    help="override: read per-epoch CSVs from here instead of "
+                         "LOG_ROOT/runs/<run-id>.")
+    ap.add_argument("--results-dir", default=None,
+                    help="override: read metrics CSVs from here instead of "
+                         "METRICS_DIR/runs/<run-id>.")
+    ap.add_argument("--out-dir", default=None,
+                    help="override: write metrics_all.csv/train_summary.csv here "
+                         "instead of METRICS_DIR/runs/<run-id>/consolidated.")
     ap.add_argument("--cls-weights", default=str(CLS_WEIGHT_DEFAULT),
                     help="weight(s) to compute --expected: '20' or '1,20,50'.")
     ap.add_argument("--seeds", default="0-7",
@@ -183,6 +215,12 @@ def main():
                     help="override of the expected run count. If omitted, computes "
                          "weights x variants x arms x seeds from the registry.")
     args = ap.parse_args()
+
+    # --run-id resolves the run-scoped defaults; explicit --*-dir wins when passed.
+    rid_logs, rid_results, rid_out = apply_run_id(args.run_id)
+    logs_dir = args.logs_dir if args.logs_dir is not None else rid_logs
+    results_dir = args.results_dir if args.results_dir is not None else rid_results
+    out_dir = args.out_dir if args.out_dir is not None else rid_out
 
     cfg = MODELS_CFG[args.model]
     re_train, re_metrics = build_regexes(cfg["folder"])
@@ -193,14 +231,18 @@ def main():
         n_cls = len([w for w in args.cls_weights.split(",") if w.strip() != ""])
         expected = n_cls * len(cfg["variants"]) * len(cfg["arms"]) * len(parse_seeds(args.seeds))
 
-    out = Path(args.out_dir)
+    out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    print(f"[run-id] {args.run_id}")
+    print(f"         logs    <- {logs_dir}")
+    print(f"         metrics <- {results_dir}")
+    print(f"         out     -> {out_dir}")
     print(f"[model] {args.model} -> folder='{cfg['folder']}'  "
           f"arms={cfg['arms']} variants={cfg['variants']}  expected={expected}")
 
-    n_m = build_metrics(args.results_dir, out / "metrics_all.csv", re_metrics)
-    n_t = build_train_summary(args.logs_dir, out / "train_summary.csv", re_train)
+    n_m = build_metrics(results_dir, out / "metrics_all.csv", re_metrics)
+    n_t = build_train_summary(logs_dir, out / "train_summary.csv", re_train)
 
     print("\n--- check ---")
     for label, n in [("metrics", n_m), ("train", n_t)]:

@@ -49,6 +49,26 @@ from pathlib import Path
 NOMINAL_INTERVAL_S = 5.0          # nvidia-smi -l 5
 CLS_WEIGHT_DEFAULT = 20
 
+# Absolute root (today's gpu_logs root). --run-id resolves the phase/gpu dir and
+# the output against this, matching apply_run_id in run_grid_validate.py and
+# consolidate_seeds.py. run_grid_gpu.py writes phase_index_* and gpulog_state_*
+# into GPULOG_DIR/runs/<id>; this reads from the SAME place. The output goes into
+# the shared consolidated/ (METRICS_DIR/runs/<id>/consolidated) so report.py finds
+# gpu_all.csv next to metrics_all.csv/train_summary.csv.
+GPULOG_DIR = "/workspace/experiments/gpu_logs"
+METRICS_DIR = "/workspace/results"
+
+
+def apply_run_id(run_id):
+    """Resolve the run-scoped dirs from --run-id against the absolute roots
+    (same convention as consolidate_seeds.apply_run_id). phase_index and
+    gpulog_state both live under GPULOG_DIR/runs/<id>; the output joins the
+    shared consolidated/ dir. Returns (phase_dir, out_dir)."""
+    phase_dir = os.path.join(GPULOG_DIR, "runs", run_id)
+    out_dir = os.path.join(METRICS_DIR, "runs", run_id, "consolidated")
+    return phase_dir, out_dir
+
+
 RUN_KEY = ["model", "cls_weight", "arm", "variant", "seed"]
 
 OUT_FIELDS = RUN_KEY + [
@@ -260,19 +280,36 @@ def process_phase_index(pi_path, gpu_dir):
 
 def main():
     ap = argparse.ArgumentParser(description="Consolidate GPU telemetry per (run,phase).")
-    ap.add_argument("--phase-dir", default="experiments/gpu_logs",
-                    help="dir with phase_index_*.csv (and, by default, the gpulog_state_*).")
+    ap.add_argument("--run-id", required=True,
+                    help="grid run-id (REQUIRED). Resolves phase-dir<-GPULOG_DIR/"
+                         "runs/<id> and out->METRICS_DIR/runs/<id>/consolidated. "
+                         "--phase-dir/--gpu-dir/--out-dir OVERRIDE this when passed.")
+    ap.add_argument("--phase-dir", default=None,
+                    help="override: dir with phase_index_*.csv (and, by default, "
+                         "the gpulog_state_*). Defaults to GPULOG_DIR/runs/<run-id>.")
     ap.add_argument("--gpu-dir", default=None,
                     help="dir of the gpulog_state_*.csv (default = --phase-dir).")
-    ap.add_argument("--out-dir", default=".")
+    ap.add_argument("--out-dir", default=None,
+                    help="override: write gpu_all.csv here instead of "
+                         "METRICS_DIR/runs/<run-id>/consolidated.")
     ap.add_argument("--phase-glob", default="phase_index_*.csv",
                     help="glob for the phase_index files inside --phase-dir.")
     args = ap.parse_args()
 
-    gpu_dir = args.gpu_dir or args.phase_dir
-    pi_files = sorted(glob.glob(os.path.join(args.phase_dir, args.phase_glob)))
+    # --run-id resolves the run-scoped defaults; explicit flags win when passed.
+    rid_phase, rid_out = apply_run_id(args.run_id)
+    phase_dir = args.phase_dir if args.phase_dir is not None else rid_phase
+    out_dir = args.out_dir if args.out_dir is not None else rid_out
+    gpu_dir = args.gpu_dir or phase_dir
+
+    print(f"[run-id] {args.run_id}")
+    print(f"         phase   <- {phase_dir}")
+    print(f"         gpu     <- {gpu_dir}")
+    print(f"         out     -> {out_dir}")
+
+    pi_files = sorted(glob.glob(os.path.join(phase_dir, args.phase_glob)))
     if not pi_files:
-        print(f"[error] no phase_index in {args.phase_dir}/{args.phase_glob}",
+        print(f"[error] no phase_index in {phase_dir}/{args.phase_glob}",
               file=sys.stderr)
         sys.exit(1)
 
@@ -289,7 +326,7 @@ def main():
                   key=lambda x: (x["model"], x["cls_weight"], x["arm"],
                                  x["variant"], x["seed"], x["phase"]))
 
-    out = Path(args.out_dir)
+    out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     out_path = out / "gpu_all.csv"
     with open(out_path, "w", newline="") as fh:

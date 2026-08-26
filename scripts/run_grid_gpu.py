@@ -88,7 +88,7 @@ CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed
 CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
 PRED_ROOT = os.environ.get("PRED_ROOT", "/workspace/datasets/waymo/predictions")
 GPULOG_DIR = os.environ.get("GPULOG_DIR", "/workspace/experiments/gpu_logs")
-NVIDIA_SMI_INTERVAL = 5          # seconds, matches your manual -l 5
+NVIDIA_SMI_INTERVAL = 1          # seconds, matches your manual -l 5
 
 PYEXE = sys.executable or "python3"
 

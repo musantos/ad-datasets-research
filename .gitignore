@@ -6,6 +6,7 @@ __pycache__/
 # Dados (brutos, cache, predicoes) -- nada aqui deve ser versionado,
 # independente do dataset (Waymo, ZOD, A2D2, etc.)
 datasets/*
+results/*
 
 # Checkpoints de modelo
 experiments/checkpoints/

@@ -23,12 +23,26 @@ No external dependencies (stdlib only).
 
 import argparse
 import csv
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 RUN_KEY = ["model", "cls_weight", "arm", "variant", "seed"]
 METRICS = ["minADE", "minFDE", "MissRate", "mAP"]
+
+# Absolute root (today's results root). --run-id resolves --in-dir against the
+# shared consolidated/ dir (same convention as consolidate_seeds.py /
+# consolidate_gpu.py), where the 3 consolidated CSVs live. report.csv is written
+# INTO that same dir (final master table, next to its inputs).
+METRICS_DIR = "/workspace/results"
+
+
+def apply_run_id(run_id):
+    """Resolve --in-dir from --run-id against the absolute results root: the
+    consolidated/ dir holding metrics_all.csv, train_summary.csv, gpu_all.csv.
+    Returns the in-dir (report.csv is written into it by default)."""
+    return os.path.join(METRICS_DIR, "runs", run_id, "consolidated")
 
 
 def read_csv_skip_comments(path):
@@ -107,15 +121,29 @@ def load_gpu(path):
 
 def main():
     ap = argparse.ArgumentParser(description="Master table (join of the 3 consolidated files).")
-    ap.add_argument("--in-dir", default=".",
-                    help="dir with metrics_all.csv, train_summary.csv, gpu_all.csv.")
-    ap.add_argument("--out", default="report.csv")
+    ap.add_argument("--run-id", required=True,
+                    help="grid run-id (REQUIRED). Resolves --in-dir <- "
+                         "METRICS_DIR/runs/<id>/consolidated (the 3 consolidated "
+                         "CSVs). --in-dir/--out OVERRIDE this when passed.")
+    ap.add_argument("--in-dir", default=None,
+                    help="override: dir with metrics_all.csv, train_summary.csv, "
+                         "gpu_all.csv. Defaults to METRICS_DIR/runs/<run-id>/consolidated.")
+    ap.add_argument("--out", default=None,
+                    help="override: path of the master table. Defaults to "
+                         "report.csv inside --in-dir.")
     ap.add_argument("--metrics", default="metrics_all.csv")
     ap.add_argument("--train", default="train_summary.csv")
     ap.add_argument("--gpu", default="gpu_all.csv")
     args = ap.parse_args()
 
-    d = Path(args.in_dir)
+    # --run-id resolves the run-scoped in-dir; explicit flags win when passed.
+    in_dir = args.in_dir if args.in_dir is not None else apply_run_id(args.run_id)
+    out_path = args.out if args.out is not None else os.path.join(in_dir, "report.csv")
+
+    d = Path(in_dir)
+    print(f"[run-id] {args.run_id}")
+    print(f"         in  <- {in_dir}")
+    print(f"         out -> {out_path}")
     metrics, horizons = load_metrics(d / args.metrics)
     train = load_train(d / args.train)
     gpu = load_gpu(d / args.gpu)
@@ -165,7 +193,7 @@ def main():
             n_partial += 1
         rows.append(row)
 
-    outp = Path(args.out)
+    outp = Path(out_path)
     with open(outp, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
