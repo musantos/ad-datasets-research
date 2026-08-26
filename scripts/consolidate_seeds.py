@@ -41,6 +41,7 @@ MODELS_CFG = {
     "sequential": dict(folder="sequential",        arms=["sdc", "agent"], variants=["raw"]),
     "vectorized": dict(folder="vectorized",        arms=["agent"],        variants=["raw", "std"]),
     "social":     dict(folder="vectorized_social", arms=["agent"],        variants=["raw", "std"]),
+    "map":        dict(folder="vectorized_social_map", arms=["agent"],    variants=["raw"]),
 }
 
 CLS_WEIGHT_DEFAULT = 20

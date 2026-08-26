@@ -4,31 +4,31 @@ GENERIC grid, GPU phase (train -> infer). Run IN THE GPU CONTAINER. The metrics
 phase (validate_motion_official) runs separately in the CPU/TF container -- see
 run_grid_validate.py.
 
-Este é o UNIFICADOR dos antigos run_grid_gpu.py (item4) e run_grid_gpu_vectorized.py
-(V0). O método vira ARGUMENTO (--model), não um arquivo novo por degrau. Toda a
-diferença entre métodos vive no REGISTRO MODELS_CFG abaixo; a máquina (sentinelas,
-gpu-loggers, phase-index) é idêntica à das versões anteriores.
+This is the UNIFIER of the old run_grid_gpu.py (item4) and run_grid_gpu_vectorized.py
+(V0). The method becomes an ARGUMENT (--model), not a new file per step. All the
+difference between methods lives in the MODELS_CFG REGISTRY below; the machinery
+(sentinels, gpu-loggers, phase-index) is identical to the previous versions.
 
   python3 run_grid_gpu.py --model vectorized      # V0: {agent} x {raw,std} x 8  = 16
   python3 run_grid_gpu.py --model social          # V1: {agent} x {raw,std} x 8  = 16
-  python3 run_grid_gpu.py --model multimodal --model2 sequential   # item4 (ver nota)
-  python3 run_grid_gpu.py --model social --dry-run  # imprime os comandos, não roda
+  python3 run_grid_gpu.py --model multimodal --model2 sequential   # item4 (see note)
+  python3 run_grid_gpu.py --model social --dry-run  # prints the commands, does not run
 
-Design (inalterado vs as versões por-método):
-  * RESUMABLE / IDEMPOTENT via sentinelas .train_done / .infer_done.
-  * GPU LOGGERS anexados (state + procs) e mortos na saída.
-  * PHASE INDEX por config (join por tempo com os gpu_logs).
+Design (unchanged vs the per-method versions):
+  * RESUMABLE / IDEMPOTENT via .train_done / .infer_done sentinels.
+  * GPU LOGGERS attached (state + procs) and killed on exit.
+  * PHASE INDEX per config (time-join with the gpu_logs).
 
-Este script NÃO toca a ciência: só chama os módulos train_*/run_inference_*
-com os mesmos args que você digitaria à mão.
+This script does NOT touch the science: it only calls the train_*/run_inference_*
+modules with the same args you would type by hand.
 
---- A PEGADINHA que o registro resolve -----------------------------------------
-O 'social' é o único caso onde o NOME DO MÓDULO difere do PREFIXO DE PASTA:
-  módulo  = src.motion.train_social / run_inference_social
-  pasta   = vectorized_social_<run_tag>   (checkpoints, predictions, logs, metrics)
-Além disso o social NÃO aceita --agent-centric (braço agente é implícito) e EXIGE
---n-neighbors. Por isso 'module', 'folder', 'agent_centric' e 'extra_*' são campos
-separados no registro.
+--- THE GOTCHA the registry solves ---------------------------------------------
+'social' is the only case where the MODULE NAME differs from the FOLDER PREFIX:
+  module  = src.motion.train_social / run_inference_social
+  folder  = vectorized_social_<run_tag>   (checkpoints, predictions, logs, metrics)
+On top of that, social does NOT accept --agent-centric (agent arm is implicit) and
+REQUIRES --n-neighbors. That is why 'module', 'folder', 'agent_centric' and 'extra_*'
+are separate fields in the registry.
 """
 import os
 import sys
@@ -39,15 +39,15 @@ import argparse
 import subprocess
 from datetime import datetime
 
-# --- REGISTRO DE MODELOS -----------------------------------------------------
-# module        : sufixo do módulo -> src.motion.train_<module> / run_inference_<module>
-# folder        : prefixo de pasta/CSV -> <folder>_<run_tag> (checkpoints/pred/logs/metrics)
-# arms          : braços a varrer (sdc|agent)
-# variants      : raw e/ou std (std anexa --standardize e sufixa _std)
-# agent_centric : se True, anexa --agent-centric quando arm=='agent'
-#                 (False no social: braço agente é IMPLÍCITO, o script não aceita a flag)
-# extra_train   : flags fixas extras no treino  (ex.: --n-neighbors do social)
-# extra_infer   : flags fixas extras na inferência (idem; MUST match o treino)
+# --- MODEL REGISTRY ----------------------------------------------------------
+# module        : module suffix -> src.motion.train_<module> / run_inference_<module>
+# folder        : folder/CSV prefix -> <folder>_<run_tag> (checkpoints/pred/logs/metrics)
+# arms          : arms to sweep (sdc|agent)
+# variants      : raw and/or std (std appends --standardize and suffixes _std)
+# agent_centric : if True, appends --agent-centric when arm=='agent'
+#                 (False for social: agent arm is IMPLICIT, the script rejects the flag)
+# extra_train   : extra fixed flags at training  (e.g.: social's --n-neighbors)
+# extra_infer   : extra fixed flags at inference (idem; MUST match training)
 MODELS_CFG = {
     "multimodal": dict(module="multimodal", folder="multimodal",
                        arms=["sdc", "agent"], variants=["raw"],
@@ -63,9 +63,22 @@ MODELS_CFG = {
                        agent_centric=False,
                        extra_train=["--n-neighbors", "16"],
                        extra_infer=["--n-neighbors", "16"]),
+    # V2 (map-aware, raw-only). module 'map' -> train_map / run_inference_map;
+    # folder 'vectorized_social_map'. agent_centric=False (arm implicit, no
+    # --agent-centric flag). M/Np frozen a priori (calibrated on cache_val_map)
+    # and MUST match the constants in train_map/run_inference_map.
+    "map":        dict(module="map", folder="vectorized_social_map",
+                       arms=["agent"], variants=["raw"],
+                       agent_centric=False,
+                       extra_train=["--n-neighbors", "16",
+                                    "--n-map-polylines", "128",
+                                    "--n-points-per-polyline", "20"],
+                       extra_infer=["--n-neighbors", "16",
+                                    "--n-map-polylines", "128",
+                                    "--n-points-per-polyline", "20"]),
 }
 
-CLS_WEIGHT_DEFAULT = 20          # usado se --cls-weights não for passado
+CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed
 
 # --- paths (match train_*/run_inference_*) -----------------------------------
 CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
@@ -135,8 +148,8 @@ def stop_gpu_loggers():
 
 
 def run_tag(cls, arm, seed, variant):
-    # O PESO entra no run_tag (cls<w>) -> pesos diferentes NUNCA colidem na mesma
-    # pasta. É o que torna a varredura de peso segura (sem sobrescrita silenciosa).
+    # The WEIGHT goes into the run_tag (cls<w>) -> different weights NEVER collide in
+    # the same folder. That is what makes the weight sweep safe (no silent overwrite).
     t = f"cls{cls:g}_{arm}_seed{seed}"
     return f"{t}_std" if variant == "std" else t
 
@@ -224,26 +237,26 @@ def dry_run(cfg, cls_weights, seeds):
         print("  infer:", " ".join(build_infer_cmd(cfg, cls, arm, seed, variant)))
         print(f"  ckpt : {CHECKPOINT_ROOT}/{cfg['folder']}_{run_tag(cls, arm, seed, variant)}/")
         print(f"  pred : {PRED_ROOT}/{cfg['folder']}_{run_tag(cls, arm, seed, variant)}/")
-    print(f"\n[DRY-RUN] {n} combos ({n} train + {n} infer). Nada foi executado.")
+    print(f"\n[DRY-RUN] {n} combos ({n} train + {n} infer). Nothing was executed.")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Generic GPU grid (train->infer).")
     ap.add_argument("--model", required=True, choices=sorted(MODELS_CFG),
-                    help="método a rodar (entrada do registro MODELS_CFG).")
+                    help="method to run (MODELS_CFG registry entry).")
     ap.add_argument("--cls-weights", default=str(CLS_WEIGHT_DEFAULT),
-                    help="peso(s) do termo de classificação. Um valor "
-                         f"(default {CLS_WEIGHT_DEFAULT}) ou lista '1,20,50' para varrer. "
-                         "O peso entra no run_tag (cls<w>), então pesos não colidem.")
+                    help="weight(s) of the classification term. A single value "
+                         f"(default {CLS_WEIGHT_DEFAULT}) or list '1,20,50' to sweep. "
+                         "The weight goes into the run_tag (cls<w>), so weights do not collide.")
     ap.add_argument("--seeds", default="0-7",
-                    help="seeds: '0-7' (faixa) ou '0,1,2' (lista). Default 0-7.")
+                    help="seeds: '0-7' (range) or '0,1,2' (list). Default 0-7.")
     ap.add_argument("--dry-run", action="store_true",
-                    help="imprime os comandos e paths sem executar (para conferência).")
+                    help="print the commands and paths without executing (for review).")
     args = ap.parse_args()
 
     cfg = MODELS_CFG[args.model]
 
-    # peso: aceita '20' (um valor) ou '1,20,50' (lista). g-format tira zeros à toa.
+    # weight: accepts '20' (a single value) or '1,20,50' (list). g-format drops trailing zeros.
     cls_weights = [float(w) for w in args.cls_weights.split(",") if w.strip() != ""]
 
     if "-" in args.seeds:

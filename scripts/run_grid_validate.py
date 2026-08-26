@@ -3,24 +3,24 @@
 GENERIC grid, METRICS phase. Run IN THE CPU/TF (metrics) CONTAINER, AFTER
 run_grid_gpu.py produced the prediction folders in the GPU container.
 
-Unifica run_grid_validate.py (item4) e run_grid_validate_vectorized.py (V0). O
-método vira ARGUMENTO (--model); o registro MODELS_CFG (o MESMO conceito do
-run_grid_gpu.py) define arms/variants e o PREFIXO DE PASTA de cada método.
+Unifies run_grid_validate.py (item4) and run_grid_validate_vectorized.py (V0). The
+method becomes an ARGUMENT (--model); the MODELS_CFG registry (the SAME concept as
+run_grid_gpu.py) defines arms/variants and the FOLDER PREFIX of each method.
 
   python3 run_grid_validate.py --model vectorized
   python3 run_grid_validate.py --model social
 
-Para cada (arm, variant, seed) chama o avaliador oficial na pasta de predições:
+For each (arm, variant, seed) it calls the official evaluator on the predictions folder:
     python3 -m src.motion.validate_motion_official --pred-dir <dir> --cleanup
 
-RESUMABLE: pula um combo cujo metrics CSV já existe (glob), então um crash ou
-run parcial só retoma. Seguro relançar.
+RESUMABLE: skips a combo whose metrics CSV already exists (glob), so a crash or
+partial run just resumes. Safe to relaunch.
 
-IMPORTANTE -- confira antes do primeiro run:
-  * MODULE PATH: validate vive em src.motion.validate_motion_official.
-  * METRICS OUTPUT: assume CSV nomeado metrics_<rundir>_<date>.csv em METRICS_DIR.
-    Se o avaliador grava noutro lugar/nome, ajuste METRICS_DIR / metrics_glob(),
-    senão o skip re-valida tudo (inofensivo, lento) ou pula errado.
+IMPORTANT -- check before the first run:
+  * MODULE PATH: validate lives in src.motion.validate_motion_official.
+  * METRICS OUTPUT: assumes a CSV named metrics_<rundir>_<date>.csv in METRICS_DIR.
+    If the evaluator writes elsewhere/another name, adjust METRICS_DIR / metrics_glob(),
+    otherwise the skip re-validates everything (harmless, slow) or skips wrongly.
 """
 import os
 import sys
@@ -28,17 +28,18 @@ import glob
 import argparse
 import subprocess
 
-# Só os campos usados na fase de métricas (folder/arms/variants). Mantido em
-# sincronia com o registro do run_grid_gpu.py -- se um método novo entra lá,
-# replicar a entrada aqui (ou, no futuro, extrair para um módulo compartilhado).
+# Only the fields used in the metrics phase (folder/arms/variants). Kept in
+# sync with the run_grid_gpu.py registry -- if a new method is added there,
+# replicate the entry here (or, in the future, extract to a shared module).
 MODELS_CFG = {
     "multimodal": dict(folder="multimodal",        arms=["sdc", "agent"], variants=["raw"]),
     "sequential": dict(folder="sequential",        arms=["sdc", "agent"], variants=["raw"]),
     "vectorized": dict(folder="vectorized",        arms=["agent"],        variants=["raw", "std"]),
     "social":     dict(folder="vectorized_social", arms=["agent"],        variants=["raw", "std"]),
+    "map":        dict(folder="vectorized_social_map", arms=["agent"],    variants=["raw"]),
 }
 
-CLS_WEIGHT_DEFAULT = 20          # usado se --cls-weights não for passado
+CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed
 
 PRED_ROOT = "/workspace/datasets/waymo/predictions"
 VALIDATE_MODULE = "src.motion.validate_motion_official"
@@ -66,10 +67,10 @@ def main():
     ap = argparse.ArgumentParser(description="Generic metrics grid (validate).")
     ap.add_argument("--model", required=True, choices=sorted(MODELS_CFG))
     ap.add_argument("--cls-weights", default=str(CLS_WEIGHT_DEFAULT),
-                    help="peso(s): um valor (default) ou lista '1,20,50'. "
-                         "DEVE casar os pesos rodados na fase GPU.")
+                    help="weight(s): a single value (default) or list '1,20,50'. "
+                         "MUST match the weights run in the GPU phase.")
     ap.add_argument("--seeds", default="0-7",
-                    help="seeds: '0-7' (faixa) ou '0,1,2' (lista). Default 0-7.")
+                    help="seeds: '0-7' (range) or '0,1,2' (list). Default 0-7.")
     args = ap.parse_args()
 
     cfg = MODELS_CFG[args.model]
