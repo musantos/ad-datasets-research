@@ -496,6 +496,90 @@ antiga) antes de reportar em absoluto; (3) opcional: re-treinar seed0_raw dentro
 da grade para ganhar telemetria de GPU (1 célula `energy_wh` vazia legítima —
 métricas presentes).
 
+### 0.12. V2.1 — camada run-id + modelo V2 construído *(26/ago/2026)* — fecha a V2.1
+
+> Este degrau é **infra + prontidão**, não ciência nova. Fecha o isolamento de
+> runs por `run-id` em TODO o pipeline e registra que o **modelo V2 (mapa) está
+> construído e smoke-testado**. Nenhuma métrica V2 existe ainda (o grid não rodou).
+
+**Camada `run-id` — completa ponta a ponta.** Todo artefato de um run agora cai sob
+`<ROOT>/runs/<id>/` (o `run-id` é um **sufixo compartilhado**, não um diretório
+relocado — os roots vivem em discos físicos distintos, então cada root nesta sob si
+o `runs/<id>`). Os três consolidadores (`consolidate_seeds.py`, `consolidate_gpu.py`,
+`report.py`) receberam a camada `--run-id` (aditiva; motores de agregação/join e a
+regex ancorada no folder **intactos**), fechando o que já estava feito nos runners,
+nos *leaves* (`train_*`/`run_inference_*`, com `sys.exit(1)` em todo caminho de erro)
+e no *validate leg* (`validate_motion_official.py`, `default_csv_path` honra
+`METRICS_DIR`). Padrão dos consolidadores: `--run-id` **required=True**, roots
+absolutos `/workspace/...`, `--*-dir` explícitos **vencem** quando passados.
+
+**Pipeline real (5 comandos, substitui a sequência manual antiga):**
+```bash
+python3 scripts/run_grid_gpu.py      --model social --seeds 0-1                                   # GPU — gera o run-id
+python3 scripts/run_grid_validate.py --model social --run-id social_2026-08-26_e355 --seeds 0-1   # CPU/TF
+python3 scripts/consolidate_seeds.py --model social --run-id social_2026-08-26_e355 --seeds 0-1   # GPU
+python3 scripts/consolidate_gpu.py                  --run-id social_2026-08-26_e355               # GPU
+python3 scripts/report.py                           --run-id social_2026-08-26_e355               # GPU
+```
+
+**Validação de mecânica (NÃO é resultado científico).** Rodou-se `social` (= V1),
+**2 seeds**, através da pipeline run-id (`run-id social_2026-08-26_e355`). Objetivo:
+provar o encanamento, não medir ciência. A cadeia rodou limpa (`returncode=0` em todas
+as fases) e **reproduziu o veredito V1** — `MissRate_15` (8 s) = 0.76 / 0.74 / 0.73 /
+0.72 (raw s0/s1, std s0/s1), na faixa do V1 já registrado (§0.11). Consistência
+cross-consolidador conferida: `energy_wh` do report = train + infer do `gpu_all`;
+`vram_max_mib` = máx entre fases; agregação do report por horizonte = média simples
+entre os 3 tipos. **São 2 seeds — não é a grade de 8; nada aqui altera o protocolo
+"seeds antes de conclusões".**
+
+**`.gitignore`:** `results/*` foi adicionado (parava o spam de CSVs velhos como
+*untracked*). **Consequência a decidir:** isso também exclui os consolidados
+`report.csv`/`metrics_all.csv` de `results/runs/<id>/consolidated/` — que são os
+artefatos reportáveis. Ou versionar sob demanda (`git add -f .../consolidated/` ou
+exceção `!results/runs/*/consolidated/`), ou guardar consolidados curados no próprio
+DOC. **Registrar qual run gerou qual número reportado** para não perder rastreabilidade.
+
+**Modelo V2 (mapa) — construído e smoke-testado.** `vectorized_social_map_model.py`
+implementa a decisão de fusão (a §3.3 do planejamento, antes em aberto, está
+**resolvida no código**): **map-subgraph SEPARADO + segunda cross-attention
+independente**, não subgraph compartilhado. Evidência no código real:
+- `map_subgraph`/`map_proj` são módulos próprios (mesma *máquina* `_SubgraphLayer`,
+  entrada de largura `F_MAP_VEC=4` vs. `9` do agente) — pesos independentes do
+  subgraph agente/vizinho.
+- `social_cross_attn` e `map_cross_attn` são duas `MultiheadAttention` distintas;
+  o `target` é query sobre dois pools (`neigh_emb`, `map_emb`), cada um mascarado
+  por presença.
+- Fusão simétrica: `fused = LN(target_emb + social_ctx + map_ctx)`.
+- Guard zero-map (mesmo do zero-neighbor do V1): com `map_mask` toda-zero,
+  `map_ctx = 0` e a V2 **reduz à V1** (redução estrutural, não bit-a-bit — o
+  LayerNorm de fusão é instância aprendida distinta). Smokes verificam ambas as
+  direções (mapa mascarado não vaza; mapa presente move a saída). Todas as
+  asserções passam.
+- Vetor de mapa = `[x_start, y_start, x_end, y_end]` (geometria pura; sem
+  tempo/velocidade/heading). Tangente explícita = ablação FUTURA, deixada de fora.
+- Knobs congelados: `M=128` polylines, `Np=20` pontos/polyline.
+- **Eixo de ablação `use_map_type`** (não estava no RESUMO): OFF (default) =
+  geometria pura; ON = embedding de tipo de entidade (lane/road_edge/road_line)
+  somado no nível da polyline → **checkpoints distintos** (braços separados). V2
+  base = `use_map_type=False`.
+- V2 roda **raw-only**: mapa NUNCA é padronizado; buffers de standardization ficam
+  identidade (mantidos para paridade de `state_dict` com V0/V1).
+
+**Dados V2 já extraídos:** cache val shards 0–2, train shards 0–5.
+
+**Próximo (fora deste degrau, cada um em chat próprio):**
+1. **Orquestração dos containers** (infra; captura do `run-id` emitido pelo
+   `run_grid_gpu.py` e injeção nos 4 downstream via `docker exec`; `set -e` antes de
+   qualquer passo destrutivo). Só ao fim disto a **§4.1 é reescrita** (uma vez, já
+   com a chamada orquestrada) — por isso a §4.1 NÃO foi tocada agora.
+2. **Grid V2 (8 seeds) → fechar com métricas oficiais.** Hipótese: a geometria da
+   via **fecha o MissRate a 8 s** que o social sozinho não fechou (§0.11)?
+
+**Pendências herdadas (seguem abertas):** tabela agregada mean±std do V1 (§0.11,
+pend. 1 — exige o `report.csv` do grid de **8 seeds**, ainda não consolidado aqui);
+baseline de velocidade constante antes de reportar métricas em absoluto; PT→EN de
+`compute_feature_stats.py` (fora do escopo run-id).
+
 ---
 
 ## 1. Objetivo da pesquisa
@@ -754,6 +838,7 @@ watch -n 1 nvidia-smi
 2. Usar mais campos do `full_state` como entrada (velocidade, heading),
    não só x,y.
 3. Incorporar outros agentes como contexto (passo maior).
-4. Incorporar roadgraph/mapa (arquitetura mais séria: GNN, VectorNet-like).
+4. Incorporar roadgraph/mapa — **modelo construído e smoke-testado (V2, ver §0.12)**;
+   deixa de ser "não iniciado". Pendente apenas o grid de 8 seeds + métricas oficiais.
 5. Regularização (dropout, weight decay) e/ou early stopping automático
    se overfitting voltar a aparecer com mais dado.
