@@ -368,6 +368,7 @@ def main():
     combos = list(iter_combos(cfg, cls_weights, seeds))
     total = len(combos)
     done = 0
+    n_fail = 0
     grid_start = time.time()
 
     try:
@@ -381,11 +382,14 @@ def main():
                            train_sentinel(cfg, cls, arm, seed, variant))
             if not ok:
                 print("       -> skipping inference for this combo (train failed).")
+                n_fail += 1
                 continue
 
-            run_phase(index_writer, index_fh, cfg["folder"], cls, arm, variant, seed,
-                      "infer", build_infer_cmd(cfg, cls, arm, seed, variant),
-                      infer_sentinel(cfg, cls, arm, seed, variant))
+            ok_infer = run_phase(index_writer, index_fh, cfg["folder"], cls, arm, variant, seed,
+                                 "infer", build_infer_cmd(cfg, cls, arm, seed, variant),
+                                 infer_sentinel(cfg, cls, arm, seed, variant))
+            if not ok_infer:
+                n_fail += 1
     finally:
         index_fh.close()
         stop_gpu_loggers()
@@ -398,6 +402,16 @@ def main():
         print(f"       GPU procs:   {procs_path}")
     print("\nNext, in the METRICS container (CPU/TF):")
     print(f"       python3 run_grid_validate.py --model {args.model} --run-id {run_id}")
+
+    # Guard 1 (hard-stop by returncode): if any combo's train/infer subprocess
+    # exited != 0, exit 1 so the orchestrator's `set -e` aborts at the GPU stage.
+    # Printed AFTER the summary so the operator keeps the phase-index path and the
+    # next-step hint. Catches a REAL crash (rc!=0); it cannot catch a rc=0
+    # sentinel trap (0 .npy with rc=0) -- Guard 2 in consolidate_seeds.py does.
+    if n_fail > 0:
+        print(f"[GUARD] {n_fail} combo(s) failed (rc!=0); exiting 1.",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

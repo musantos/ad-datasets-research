@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 from collections import defaultdict
 
@@ -27,8 +28,8 @@ N_POINTS_PER_POLYLINE = 20
 FEATURES = ("x", "y", "heading", "vx", "vy")
 
 CACHE_DIR = "/workspace/datasets/waymo/cache_val_map"
-CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
-PRED_ROOT = "/workspace/datasets/waymo/predictions"
+CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
+PRED_ROOT = os.environ.get("PRED_ROOT", "/workspace/datasets/waymo/predictions")
 
 MODEL_NAME = "vectorized_social_map"
 CHECKPOINT_NAME = "map_best.pth"
@@ -71,7 +72,7 @@ def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS,
         print(f"[ERROR] Checkpoint not found: {checkpoint_path}")
         available = [d for d in os.listdir(CHECKPOINT_ROOT) if d.startswith(MODEL_NAME)]
         print(f"       Available folders: {sorted(available)}")
-        return
+        sys.exit(1)
 
     os.makedirs(pred_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,7 +82,7 @@ def run_inference(tag, seed=None, standardize=False, n_neighbors=N_NEIGHBORS,
         n_points_per_polyline=n_points_per_polyline, features=FEATURES)
     if len(dataset) == 0:
         print(f"[ERROR] No target agents in validation cache: {CACHE_DIR}")
-        return
+        sys.exit(1)
     n_features = dataset.n_features
 
     model = VectorizedSocialMapTrajectoryPredictor(

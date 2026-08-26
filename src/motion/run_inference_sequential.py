@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 from collections import defaultdict
 
@@ -26,8 +27,8 @@ FEATURES = ("x", "y", "heading", "vx", "vy")
 # scanned the entire cache, which contained the training data -- the
 # resulting metrics measured memorization together with generalization.
 CACHE_DIR = "/workspace/datasets/waymo/cache_val"
-CHECKPOINT_ROOT = "/workspace/experiments/checkpoints"
-PRED_ROOT = "/workspace/datasets/waymo/predictions"
+CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
+PRED_ROOT = os.environ.get("PRED_ROOT", "/workspace/datasets/waymo/predictions")
 
 
 def run_inference(tag, agent_centric, seed=None):
@@ -56,7 +57,7 @@ def run_inference(tag, agent_centric, seed=None):
         print(f"[ERROR] Checkpoint not found: {checkpoint_path}")
         available = [d for d in os.listdir(CHECKPOINT_ROOT) if d.startswith("sequential")]
         print(f"       Available folders: {sorted(available)}")
-        return
+        sys.exit(1)
 
     os.makedirs(pred_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,7 +68,7 @@ def run_inference(tag, agent_centric, seed=None):
         CACHE_DIR, agent_centric=agent_centric, features=FEATURES)
     if len(dataset) == 0:
         print(f"[ERROR] No target agents in validation cache: {CACHE_DIR}")
-        return
+        sys.exit(1)
     n_features = dataset.n_features
 
     model = SequentialTrajectoryPredictor(

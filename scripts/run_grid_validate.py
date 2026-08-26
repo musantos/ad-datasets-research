@@ -144,6 +144,17 @@ def main():
     print(f"Consolidate: python3 consolidate_seeds.py --model {args.model} "
           f"--cls-weights {args.cls_weights} --run-id {args.run_id}")
 
+    # Guard 1 (hard-stop by returncode): if any combo's validate subprocess
+    # exited != 0, exit 1 so the orchestrator's `set -e` aborts the chain.
+    # Printed AFTER the summary so the operator still sees the diagnostics.
+    # Note: a combo with NO predictions (missing_preds, e.g. the sentinel-trap
+    # case) is a skip, not an rc!=0 failure, so it is NOT caught here -- Guard 2
+    # in consolidate_seeds.py catches that one (matched != expected).
+    if n_fail > 0:
+        print(f"[GUARD] {n_fail} combo(s) failed validation (rc!=0); exiting 1.",
+              file=sys.stderr)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

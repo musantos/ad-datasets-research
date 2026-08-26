@@ -214,6 +214,11 @@ def main():
     ap.add_argument("--expected", type=int, default=None,
                     help="override of the expected run count. If omitted, computes "
                          "weights x variants x arms x seeds from the registry.")
+    ap.add_argument("--allow-incomplete", action="store_true",
+                    help="do NOT fail when matched != expected (intentional "
+                         "partial). By default the check exits 1 on a mismatch so "
+                         "the orchestrator aborts before report.py builds an empty "
+                         "report (Guard 2: catches the rc=0 sentinel-trap case).")
     args = ap.parse_args()
 
     # --run-id resolves the run-scoped defaults; explicit --*-dir wins when passed.
@@ -245,9 +250,22 @@ def main():
     n_t = build_train_summary(logs_dir, out / "train_summary.csv", re_train)
 
     print("\n--- check ---")
+    incomplete = False
     for label, n in [("metrics", n_m), ("train", n_t)]:
-        flag = "OK" if n == expected else "!! REVIEW"
+        ok = (n == expected)
+        incomplete = incomplete or not ok
+        flag = "OK" if ok else "!! REVIEW"
         print(f"  {label}: {n} runs (expected {expected})  [{flag}]")
+
+    # Guard 2 (false-success): a run that produced rc=0 but no output (sentinel
+    # trap) reaches here as matched < expected. Promote that to exit 1 so the
+    # orchestrator's `set -e` aborts BEFORE report.py emits an empty report.
+    # Guard 1 (returncode) cannot catch this case because rc was 0.
+    if incomplete and not args.allow_incomplete:
+        print(f"[GUARD] incomplete consolidation (matched != expected={expected}); "
+              f"exiting 1. Pass --allow-incomplete for an intentional partial.",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
