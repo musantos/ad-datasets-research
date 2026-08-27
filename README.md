@@ -21,16 +21,19 @@ Prediction — a decidir conforme o projeto avança.
 
 ## Status atual
 
-🟢 **Etapa de Motion concluída (aquecimento):** pipeline de Motion
-Prediction funcional de ponta a ponta no Waymo Open Motion Dataset — desde
-a leitura dos dados brutos até a validação com as métricas oficiais do
-desafio (minADE, minFDE, Miss Rate, mAP). A espinha de experimentos
-controlados `MLP → encoder sequencial → normalização agente-cêntrica → V0
-vetorizado → V1 social → V2 mapa → V3 topologia de lane` avança: V0/V1
-fechados e validados com múltiplas seeds; V2 e V3 já construídos e
-smoke-testados (seed0), com as grades de 8 seeds pendentes para fechar
-o veredito de cada degrau. Registro técnico completo (setup, bugs
-corrigidos, resultados por seed, limitações) em
+🟢 **Pipeline de Motion funcional de ponta a ponta** no Waymo Open Motion
+Dataset — da leitura dos dados brutos à validação com as métricas oficiais
+do desafio (minADE, minFDE, Miss Rate, mAP). O estudo segue uma **escada
+experimental controlada** que isola **uma variável arquitetural por etapa**
+(`MLP → VectorNet (V0) → contexto social (V1) → mapa (V2) → topologia de
+lane (V3)`), permitindo atribuir cada ganho a um componente específico — ao
+contrário de comparações que misturam dados, treino e arquitetura de uma vez.
+Cada degrau é avaliado contra as métricas oficiais da Waymo e, como eixo
+secundário, contra o custo computacional (tempo, potência de GPU). **Estado:**
+infraestrutura oficial ~90% pronta; V0/V1 fechados e validados com múltiplas
+seeds; V2 e V3 construídos e smoke-testados (seed0), com as grades de 8 seeds
+pendentes para fechar o veredito de cada degrau. Registro técnico completo
+(setup, bugs corrigidos, resultados por seed, limitações) em
 [`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md). *(Um
 relatório destilado `docs/waymo_motion.md` está planejado, caso a etapa
 renda um paper próprio de Motion.)*
