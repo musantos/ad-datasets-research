@@ -37,6 +37,7 @@ MODELS_CFG = {
     "vectorized": dict(folder="vectorized",        arms=["agent"],        variants=["raw", "std"]),
     "social":     dict(folder="vectorized_social", arms=["agent"],        variants=["raw", "std"]),
     "map":        dict(folder="vectorized_social_map", arms=["agent"],    variants=["raw"]),
+    "lane_topo":  dict(folder="lane_topo",             arms=["agent"],    variants=["raw"]),
 }
 
 CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed

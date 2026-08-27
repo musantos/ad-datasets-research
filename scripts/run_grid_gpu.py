@@ -77,6 +77,21 @@ MODELS_CFG = {
                        extra_infer=["--n-neighbors", "16",
                                     "--n-map-polylines", "128",
                                     "--n-points-per-polyline", "20"]),
+    # V3 (map-aware + LANE TOPOLOGY, raw-only). module 'lane_topo' ->
+    # train_lane_topo / run_inference_lane_topo; folder 'lane_topo' (NOT a
+    # superset of 'vectorized_social_map', so the consolidation regexes cannot
+    # cross-match V2 vs V3). agent_centric=False (arm implicit). M/Np frozen == V2
+    # (the topology alignment depends on M) and MUST match train_lane_topo /
+    # run_inference_lane_topo.
+    "lane_topo":  dict(module="lane_topo", folder="lane_topo",
+                       arms=["agent"], variants=["raw"],
+                       agent_centric=False,
+                       extra_train=["--n-neighbors", "16",
+                                    "--n-map-polylines", "128",
+                                    "--n-points-per-polyline", "20"],
+                       extra_infer=["--n-neighbors", "16",
+                                    "--n-map-polylines", "128",
+                                    "--n-points-per-polyline", "20"]),
 }
 
 CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed
