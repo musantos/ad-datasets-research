@@ -246,8 +246,8 @@ def main():
     print(f"[model] {args.model} -> folder='{cfg['folder']}'  "
           f"arms={cfg['arms']} variants={cfg['variants']}  expected={expected}")
 
-    n_m = build_metrics(results_dir, out / "metrics_all.csv", re_metrics)
-    n_t = build_train_summary(logs_dir, out / "train_summary.csv", re_train)
+    n_m = build_metrics(results_dir, out / f"metrics_all_{args.run_id}.csv", re_metrics)
+    n_t = build_train_summary(logs_dir, out / f"train_summary_{args.run_id}.csv", re_train)
 
     print("\n--- check ---")
     incomplete = False

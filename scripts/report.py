@@ -131,22 +131,30 @@ def main():
     ap.add_argument("--out", default=None,
                     help="override: path of the master table. Defaults to "
                          "report.csv inside --in-dir.")
-    ap.add_argument("--metrics", default="metrics_all.csv")
-    ap.add_argument("--train", default="train_summary.csv")
-    ap.add_argument("--gpu", default="gpu_all.csv")
+    ap.add_argument("--metrics", default=None,
+                    help="override input name. Default metrics_all_<run-id>.csv.")
+    ap.add_argument("--train", default=None,
+                    help="override input name. Default train_summary_<run-id>.csv.")
+    ap.add_argument("--gpu", default=None,
+                    help="override input name. Default gpu_all_<run-id>.csv.")
     args = ap.parse_args()
 
     # --run-id resolves the run-scoped in-dir; explicit flags win when passed.
     in_dir = args.in_dir if args.in_dir is not None else apply_run_id(args.run_id)
-    out_path = args.out if args.out is not None else os.path.join(in_dir, "report.csv")
+    out_path = args.out if args.out is not None else os.path.join(in_dir, f"report_{args.run_id}.csv")
+    # Consolidated input names carry the run-id too (write/read parity with the
+    # consolidators), so no artifact collides once pulled out of runs/<id>/.
+    metrics_name = args.metrics if args.metrics is not None else f"metrics_all_{args.run_id}.csv"
+    train_name = args.train if args.train is not None else f"train_summary_{args.run_id}.csv"
+    gpu_name = args.gpu if args.gpu is not None else f"gpu_all_{args.run_id}.csv"
 
     d = Path(in_dir)
     print(f"[run-id] {args.run_id}")
     print(f"         in  <- {in_dir}")
     print(f"         out -> {out_path}")
-    metrics, horizons = load_metrics(d / args.metrics)
-    train = load_train(d / args.train)
-    gpu = load_gpu(d / args.gpu)
+    metrics, horizons = load_metrics(d / metrics_name)
+    train = load_train(d / train_name)
+    gpu = load_gpu(d / gpu_name)
 
     if not (metrics or train or gpu):
         print(f"[error] none of the 3 CSVs found in {d}/", file=sys.stderr)

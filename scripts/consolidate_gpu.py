@@ -328,7 +328,7 @@ def main():
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    out_path = out / "gpu_all.csv"
+    out_path = out / f"gpu_all_{args.run_id}.csv"
     with open(out_path, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=OUT_FIELDS)
         w.writeheader()
