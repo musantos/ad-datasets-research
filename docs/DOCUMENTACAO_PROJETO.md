@@ -582,6 +582,69 @@ baseline de velocidade constante antes de reportar métricas em absoluto; PT→E
 
 ---
 
+### 0.13. V3 `lane_topo` — registro no pipeline + consolidação do seed0 *(27/ago/2026)* — fecha o registro do V3 nos consolidadores
+
+> Este degrau é **infra + prontidão de consolidação**, não veredito científico.
+> Registra o modelo **`lane_topo` (V3, topologia de lane)** no consolidador genérico
+> e fecha a consolidação do **seed0** ponta a ponta. **1 seed = direção; a hipótese
+> do V3 NÃO está fechada** (regra N=8-antes-de-veredito).
+
+**Registro no `consolidate_seeds.py`.** Nova entrada no `MODELS_CFG`:
+`"lane_topo": folder="lane_topo", arms=["agent"], variants=["raw"]` — irmão do V2 map
+(agent-only, raw; herda o contrato de saída do V2). `run_pipeline.sh` recebeu só o
+comentário (`...|map|lane_topo|...`); **`report.py` NÃO foi tocado** por já ser agnóstico
+a modelo (join por `RUN_KEY`, expansão de horizonte dinâmica — `model` é só dado que flui
+dos CSVs). Verificado: `py_compile` + `bash -n` OK, e o **smoke de anti-colisão de regex**
+(invariante §3.1 / §0.8) passou — o arquivo real
+`metrics_lane_topo_cls20_agent_seed0_2026-08-27.csv` casa só com `lane_topo` e não há
+cross-match com nenhum outro folder em nenhuma direção (`lane_topo` não é prefixo nem
+superset de nenhum folder existente).
+
+**Guard 2 validada em campo (não é bug).** A 1ª consolidação com `SEEDS` no default do
+orquestrador (`0-1`) deu `expected=2` vs. `matched=1` (só há seed0 em disco) → a guard
+promoveu `exit 1` e o `set -e` abortou a cadeia **antes** de `consolidate_gpu.py`/
+`report.py`. Corrigido declarando 1 seed intencional (`SEEDS=0` → `expected=1`). **Bônus
+empírico:** `1 runs matched; 0 files ignored` confirma que **`lane_topo` é agent-only (sem
+braço `sdc`)** — o caveat de `--expected`/`sdc` (herdado de multimodal/sequential) fica
+fechado: o V3 herdou o contrato agent-only do V2.
+
+**Resultado seed0 (DIREÇÃO, não veredito).** Run `lane_topo_2026-08-27_cb35`, arm=agent,
+raw, formato MULTIMODAL K=6, média entre VEHICLE/PED/CYC:
+
+| horizonte | minADE | minFDE | MissRate | mAP   |
+|-----------|--------|--------|----------|-------|
+| 5 (~3 s)  | 0.589  | 1.004  | 0.370    | 0.193 |
+| 9 (~5 s)  | 1.129  | 2.214  | 0.502    | 0.169 |
+| 15 (~8 s) | 2.089  | 4.831  | 0.674    | 0.107 |
+
+Custo (report joinado): best_epoch 49 (early-stop, +10 após o best), treino ~993 s total
+(~825 s até o best), **12.19 Wh** (11.91 treino + 0.28 infer), util GPU treino **17.3 %
+médio** (73 % pico), VRAM 2422 MiB.
+
+**Leitura.** Contra o smoke de 26/ago (V2 map, seed único de run distinto — comparação só
+direcional): **MR15 0.674 vs. V2 0.651 → o V3 NÃO fecha o MissRate longo neste seed**; a
+hipótese do degrau ("conectividade de lane fecha o MR residual a 8 s que o V2 deixa
+aberto") não se confirma com 1 seed. O ganho aparece em **mAP15 0.107** (melhor da escada
+até aqui) — i.e. ranqueamento/multimodalidade, não cobertura. **Gargalo é CPU/IO, não
+compute:** util 17.3 % = GPU em *starvation* (message-passing + carga da adjacência densa
+`[R,M,M]`), o que **diverge** da previsão de saturação de *compute* do handoff B.1 — o
+sintoma real é GPU ociosa esperando dados. Revisar prefetch/num-workers antes das 8 seeds.
+
+**Lacuna de documentação (backfill pendente — fonte em arquivos reais).** Entre a §0.12 e
+este ponto ocorreram, e estão fechados em handoffs próprios ainda NÃO dobrados neste DOC
+como `§0.X`: (a) o **mega-run smoke de 26/ago** (5 modelos × 1 seed, verde;
+`RESUMO_mega_test_smoke`), que inclui a 1ª métrica seed0 do V2; (b) a **Etapa B.1** —
+loader de topologia `waymo_pytorch_dataset_map_topo.py` e o contrato da **10-tupla**
+(`HANDOFF_V3_etapaB1`). Dobrar cada um como `§0.X` é edição dedicada (fonte real
+disponível), deixada para um passo próprio.
+
+**Próximo (fora deste degrau):** confirmar a **sincronia dos runners**
+(`run_grid_gpu.py`/`run_grid_validate.py` têm `MODELS_CFG` próprio, não visto nesta
+sessão) e o **aceite B.2** (`map_adjacency` zerada → V3 reduz a V2 via `torch.allclose`)
+**antes** do grid V3 de 8 seeds que transforma a direção em veredito.
+
+---
+
 ## 1. Objetivo da pesquisa
 
 Projeto de mestrado em datasets automotivos / autonomous driving. Foco inicial:

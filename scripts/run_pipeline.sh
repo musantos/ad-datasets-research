@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # --- config (override via env) ----------------------------------------------
-MODEL="${MODEL:-social}"          # MODELS_CFG entry: vectorized|social|map|...
+MODEL="${MODEL:-social}"          # MODELS_CFG entry: vectorized|social|map|lane_topo|...
 SEEDS="${SEEDS:-0-1}"             # '0-7' (range) or '0,1,2' (list)
 STAGE="${STAGE:-all}"             # all | gpu | validate | consolidate
 GPU="${GPU_CONTAINER:-gpu_env}"   # PyTorch/CUDA container

@@ -25,9 +25,11 @@ Prediction — a decidir conforme o projeto avança.
 Prediction funcional de ponta a ponta no Waymo Open Motion Dataset — desde
 a leitura dos dados brutos até a validação com as métricas oficiais do
 desafio (minADE, minFDE, Miss Rate, mAP). A espinha de experimentos
-controlados `MLP → encoder sequencial → normalização agente-cêntrica` está
-fechada e validada com múltiplas seeds; próximo degrau é o modelo
-vetorizado com contexto de mapa. Registro técnico completo (setup, bugs
+controlados `MLP → encoder sequencial → normalização agente-cêntrica → V0
+vetorizado → V1 social → V2 mapa → V3 topologia de lane` avança: V0/V1
+fechados e validados com múltiplas seeds; V2 e V3 já construídos e
+smoke-testados (seed0), com as grades de 8 seeds pendentes para fechar
+o veredito de cada degrau. Registro técnico completo (setup, bugs
 corrigidos, resultados por seed, limitações) em
 [`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md). *(Um
 relatório destilado `docs/waymo_motion.md` está planejado, caso a etapa
