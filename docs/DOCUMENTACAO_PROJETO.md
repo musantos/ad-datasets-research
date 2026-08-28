@@ -1,6 +1,6 @@
 # Projeto de Mestrado — Motion Prediction (Waymo Open Dataset)
 ### Documento de contexto
-Última atualização: 22 de agosto de 2026
+Última atualização: 28 de agosto de 2026
 
 > **Nota de leitura.** As seções **1–11** abaixo são o registro **histórico do
 > Milestone 1** (16/jul/2026: baseline MLP *unimodal*, `random_split`, 3 shards).
@@ -642,6 +642,85 @@ disponível), deixada para um passo próprio.
 (`run_grid_gpu.py`/`run_grid_validate.py` têm `MODELS_CFG` próprio, não visto nesta
 sessão) e o **aceite B.2** (`map_adjacency` zerada → V3 reduz a V2 via `torch.allclose`)
 **antes** do grid V3 de 8 seeds que transforma a direção em veredito.
+
+---
+
+### 0.14. Mega-run 8 seeds — vereditos V2/V3 + infra fechada *(27–28/ago/2026)* — fecha os degraus V2 e V3 e a infraestrutura
+
+> Grade única **6 modelos × 8 seeds** lançada na noite de 27/ago (V0, V1, V2, V3,
+> multimodal, sequential; `agent/raw` + `std` onde aplicável), consolidada num
+> `report.csv` mesclado por `model`. Transforma V2 e V3 de "direção" (§0.12/§0.13)
+> em **veredito N=8**. Comparação limpa = `arm=agent, variant=raw`; os braços `sdc`
+> de multimodal/sequential (prevêem só o ego) ficam em **eixo à parte**. Fonte: o
+> `report.csv` mesclado (80 linhas), reconferido nesta sessão.
+
+**Saúde da grade.** As 10 combinações `model×arm×variant` têm **8 seeds [0–7]
+completas** (Guard 2 passaria: `matched==expected`). Monotonicidade correta nos 4
+degraus (ADE/FDE/MR sobem com horizonte, mAP cai); nada degenerado (nenhum MR=1.0,
+nenhum mAP~0). `lane_topo` produziu as 8 seeds → **sync de registry dos runners
+confirmado de fato** (pendência de §0.13 fechada empiricamente).
+
+**Reprodução do V0 (validação de confiança).** O V0-raw do mega-run reproduz o
+§0.10 **exato** no overall: minADE 1.468, MR 0.615, mAP 0.119 — idêntico à grade V0
+fechada. O mega-run é consistente com os degraus já reportados.
+
+**Tabela — overall (média das 9 breakdowns), média ± desvio das 8 seeds** (mesmo
+frame das §0.9–0.11):
+
+| degrau | minADE | minFDE | MissRate | mAP |
+|--------|--------|--------|----------|-----|
+| V0 vectorized | 1.468 ± 0.042 | 3.409 ± 0.085 | 0.615 ± 0.024 | 0.119 ± 0.034 |
+| V1 social | 1.426 ± 0.039 | 3.178 ± 0.083 | 0.606 ± 0.029 | 0.116 ± 0.031 |
+| V2 map | **1.251 ± 0.026** | **2.667 ± 0.075** | **0.505 ± 0.016** | **0.139 ± 0.029** |
+| V3 lane_topo | 1.273 ± 0.041 | 2.700 ± 0.096 | 0.532 ± 0.036 | 0.127 ± 0.025 |
+
+**MissRate no horizonte longo `_15` (8 s) — a métrica-hipótese** (mean±std, 8 seeds):
+V0 0.738 ± 0.017 · V1 0.748 ± 0.030 · V2 **0.649 ± 0.014** · V3 0.673 ± 0.027.
+
+**Veredito V2 (mapa) — CONFIRMADO.** Pareado por seed vs V1, horizonte 8 s:
+MissRate_15 **−0.099 (p = 8.3e-6)**, minADE_15 −0.34 (p = 1.4e-5), minFDE_15 −0.97
+(p = 2.3e-5), mAP_15 +0.033 (p = 0.004). A geometria da via **fecha o MissRate
+longo** que o social não fechou (§0.11) — hipótese do V2 confirmada. Nota: V1 **não**
+melhora MR sobre V0 nem no overall (0.606 vs 0.615, dentro do erro) nem a 8 s (0.748
+vs 0.738) — o degrau que fecha cobertura é o mapa, não o social.
+
+**Veredito V3 (topologia de lane) — NÃO confirmado.** Pareado vs V2, 8 s: MissRate_15
+**+0.025 (p = 0.11**, numericamente pior), minADE_15 (p = 0.32), minFDE_15 (p = 0.79),
+mAP_15 **−0.015 (p = 0.32)**. Nenhuma métrica melhora significativamente. O ganho em
+mAP do seed0 (§0.13) **não sobreviveu a N=8** — era ruído de seed. Achado honesto e
+reportável: *sobre a geometria do mapa, a conectividade de lane não traz ganho
+mensurável neste slice*. A dispersão das 8 seeds mostra V2 e V3 **sobrepostos** (blinda
+o negativo). Negativo limpo, não falha.
+
+**GATE pré-report do V3 (segue aberto).** O veredito de número está fechado, mas a
+**atribuição limpa** ("só a topologia mudou") ainda depende do aceite **B.2**
+(`map_adjacency` zerada → V3 reduz a V2 via `torch.allclose`), não confirmado
+(§0.13). Rodar antes de reportar o V3 como degrau formalmente fechado.
+
+**Custo / gargalo (do próprio mega-run, sem profiling novo).** util GPU treino média:
+V0 6.6 % · V1 9.9 % · V2 16.3 % · V3 17.0 %. **Toda a escada é upstream-bound**
+(dataload/IO), não compute — confirma §0.8/§0.13. Energia/run: V0/V1 ~1–2 Wh; V2/V3
+~12.5 Wh (~6–10×). V3 custa ≈ V2 por ganho nulo → dominado também em custo-benefício.
+
+**Pendência §0.11 resolvida.** A tabela agregada mean±std do V1 (TODO de §0.11) sai do
+próprio mega-run — está na tabela overall acima e no `_15`.
+
+**Infraestrutura — FECHADA (100 %).** O mega-run é a validação de produção do pipeline
+inteiro: orquestrador run-id nos 6 modelos; Guard 1/2 ativos (Guard 2 passou em todas
+as combinações); grid runners com `lane_topo` sincronizado; consolidadores genéricos
+por `--model`; rename `report_<run-id>`. Nada de infra pendente; ajustes finos
+(prefetch/num-workers, docstrings) são performance/cosméticos, não bloqueadores.
+
+**Gates que seguem abertos (atribuição/afirmação, não infra):** B.2 do V3; baseline de
+**velocidade constante** (pré-req de métricas absolutas); **decisão do split de tuning**
+e **inventário flag-vs-literal** (antes de abrir eixos de hiperparâmetro); **curva de
+data-scaling**; decisão multimodal/sequential (método de comparação vs legado).
+Backfills de `§0.X` ainda pendentes: mega-run smoke 26/ago e Etapa B.1 (fontes em
+handoffs reais).
+
+**Artefatos desta sessão (candidatos a `docs/`):** `REPORT_status_preliminar_2026-08-28.md`
++ 3 figuras (escada com barras de erro; custo-benefício; dispersão de seeds) + rascunho
+destilado `waymo_motion.md` (o relatório previsto no README).
 
 ---
 
