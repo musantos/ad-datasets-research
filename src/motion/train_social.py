@@ -35,6 +35,7 @@ VAL_CACHE = "/workspace/datasets/waymo/cache_val"
 
 CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
 LOG_ROOT = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
+TRAIN_ALLOWLIST = os.environ.get("TRAIN_ALLOWLIST")  # None -> whole folder (data-scaling allowlist)
 STATS_PATH = "/workspace/experiments/feature_stats.npy"
 
 MODEL_NAME = "vectorized_social"      # prefixo de pasta/log (não colide com V0)
@@ -99,7 +100,7 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
 
     try:
         train_dataset = WaymoMotionDatasetSocial(
-            TRAIN_CACHE, n_neighbors=n_neighbors, features=FEATURES)
+            TRAIN_CACHE, n_neighbors=n_neighbors, features=FEATURES, allowlist=TRAIN_ALLOWLIST)
         val_dataset = WaymoMotionDatasetSocial(
             VAL_CACHE, n_neighbors=n_neighbors, features=FEATURES)
     except Exception as e:

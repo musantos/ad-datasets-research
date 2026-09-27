@@ -103,7 +103,7 @@ CLS_WEIGHT_DEFAULT = 20          # used if --cls-weights is not passed
 CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
 PRED_ROOT = os.environ.get("PRED_ROOT", "/workspace/datasets/waymo/predictions")
 GPULOG_DIR = os.environ.get("GPULOG_DIR", "/workspace/experiments/gpu_logs")
-NVIDIA_SMI_INTERVAL = 1          # seconds, matches your manual -l 5
+NVIDIA_SMI_INTERVAL = 500          # seconds, matches your manual -l 5 // using lms 500
 
 PYEXE = sys.executable or "python3"
 
@@ -159,6 +159,7 @@ def write_run_txt(run_id, cfg, cls_weights, seeds, model):
         f.write(f"arms        : {cfg['arms']}\n")
         f.write(f"variants    : {cfg['variants']}\n")
         f.write(f"extra_train : {' '.join(cfg['extra_train'])}\n")
+        f.write(f"allowlist   : {os.environ.get('TRAIN_ALLOWLIST', '(none: full cache)')}\n")
         f.write(f"argv        : {' '.join(sys.argv)}\n")
     print(f"[run.txt] {path}")
 
@@ -175,12 +176,12 @@ def start_gpu_loggers():
         "nvidia-smi",
         "--query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,"
         "power.draw,temperature.gpu,pstate",
-        "--format=csv", "-l", str(NVIDIA_SMI_INTERVAL),
+        "--format=csv", "-lms", str(NVIDIA_SMI_INTERVAL), #using -lms 500, instead of -l 1/5
     ]
     procs_cmd = [
         "nvidia-smi",
         "--query-compute-apps=timestamp,pid,process_name,used_memory",
-        "--format=csv", "-l", str(NVIDIA_SMI_INTERVAL),
+        "--format=csv", "-lms", str(NVIDIA_SMI_INTERVAL), #using -lms 500, instead of -l 1/5
     ]
 
     for cmd, path in [(state_cmd, state_path), (procs_cmd, procs_path)]:

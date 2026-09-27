@@ -49,9 +49,9 @@ echo "[run-id] ${RID}   (model=${MODEL} seeds=${SEEDS} stage=${STAGE} dry=${DRY}
 run() {
   local container="$1"; shift
   if [[ "$DRY" == "1" ]]; then
-    echo "docker exec -w ${WORKDIR} ${container} $*"
+    echo "docker exec -w ${WORKDIR} -e TRAIN_ALLOWLIST ${container} $*"
   else
-    docker exec -w "${WORKDIR}" "${container}" "$@"
+    docker exec -w "${WORKDIR}" -e TRAIN_ALLOWLIST "${container}" "$@"
   fi
 }
 

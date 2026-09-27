@@ -126,13 +126,16 @@ class WaymoMotionDatasetMap(WaymoMotionDatasetSocial):
         n_points_per_polyline=N_POINTS_PER_POLYLINE,
         features=("x", "y", "heading", "vx", "vy"),
         heading_as_sincos=True,
+        allowlist=None,
     ):
         # Inherit sample indexing, feature validation, n_features, neighbor setup.
+        # allowlist is threaded straight through to Social (own os.listdir).
         super().__init__(
             cache_dir,
             n_neighbors=n_neighbors,
             features=features,
             heading_as_sincos=heading_as_sincos,
+            allowlist=allowlist,
         )
         self.n_map_polylines = int(n_map_polylines)
         self.n_points_per_polyline = int(n_points_per_polyline)

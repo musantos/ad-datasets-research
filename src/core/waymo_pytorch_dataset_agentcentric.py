@@ -71,6 +71,7 @@ class WaymoMotionDatasetAgentCentric(Dataset):
         agent_centric=True,
         features=("x", "y", "heading", "vx", "vy"),
         heading_as_sincos=True,
+        allowlist=None,
     ):
         self.cache_dir = cache_dir
         self.agent_centric = agent_centric
@@ -94,6 +95,22 @@ class WaymoMotionDatasetAgentCentric(Dataset):
         file_list = [f for f in os.listdir(cache_dir) if f.endswith('.npy')]
         if len(file_list) == 0:
             print(f"WARNING: No file found in {cache_dir}")
+
+        # Optional data-scaling filter: keep only the .npy basenames listed in
+        # the allowlist manifest. Fail EARLY (not silent drop): a manifest id
+        # absent from the folder means the wrong manifest or an incomplete
+        # pre-processing, both of which would silently corrupt the x-axis of the
+        # scaling curve. allowlist=None -> whole folder (the default; no-op).
+        if allowlist is not None:
+            keep = {line.strip() for line in open(allowlist) if line.strip()}
+            missing = keep - set(file_list)
+            if missing:
+                raise FileNotFoundError(
+                    f"{len(missing)} id(s) from manifest '{allowlist}' absent in "
+                    f"{cache_dir} (e.g.: {sorted(missing)[:3]}). Wrong manifest "
+                    f"or incomplete pre-processing."
+                )
+            file_list = [f for f in file_list if f in keep]
 
         self.samples = []
         for fname in file_list:

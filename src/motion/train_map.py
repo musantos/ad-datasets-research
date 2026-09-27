@@ -40,6 +40,7 @@ VAL_CACHE = "/workspace/datasets/waymo/cache_val_map"
 
 CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/checkpoints")
 LOG_ROOT = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
+TRAIN_ALLOWLIST = os.environ.get("TRAIN_ALLOWLIST")  # None -> whole folder (data-scaling allowlist)
 STATS_PATH = "/workspace/experiments/feature_stats.npy"
 
 MODEL_NAME = "vectorized_social_map"   # folder/log prefix (does not collide with V0/V1)
@@ -113,7 +114,7 @@ def train(cls_weight, seed=None, standardize=False, stats_path=STATS_PATH,
     try:
         train_dataset = WaymoMotionDatasetMap(
             TRAIN_CACHE, n_neighbors=n_neighbors, n_map_polylines=n_map_polylines,
-            n_points_per_polyline=n_points_per_polyline, features=FEATURES)
+            n_points_per_polyline=n_points_per_polyline, features=FEATURES, allowlist=TRAIN_ALLOWLIST)
         val_dataset = WaymoMotionDatasetMap(
             VAL_CACHE, n_neighbors=n_neighbors, n_map_polylines=n_map_polylines,
             n_points_per_polyline=n_points_per_polyline, features=FEATURES)

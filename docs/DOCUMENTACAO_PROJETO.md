@@ -724,6 +724,78 @@ destilado `waymo_motion.md` (o relatório previsto no README).
 
 ---
 
+### 0.15. Data-scaling ponto-24 — allowlist/cache cumulativo + veredito 6→12→24 *(07–27/set/2026)* — fecha o mecanismo de data-scaling e o comparativo 6/12/24
+
+> Mega-run **6 modelos × 8 seeds** por ponto de escala (6/12/24 shards de treino),
+> sobre **cache cumulativo** filtrado por **manifest/allowlist** — não mais
+> pastas-por-budget. Val travada (régua fixa; não escala por acidente — *by design*).
+> Fonte: CSVs reais `MegaRun_{6,12,24}Shrads_MotionPrediction.csv`, N=8, `agent/raw`,
+> métrica `_15`. Transforma o mecanismo de escala de "direção" (§0.14) em **infra
+> validada end-to-end** e entrega o primeiro veredito de curva.
+
+**Mecanismo de allowlist — FECHADO (todos os trains + loaders).** Parâmetro `allowlist`
+propagado por env `TRAIN_ALLOWLIST` (`None` → cache inteiro, no-op):
+- **Loaders** (`waymo_pytorch_dataset_{agentcentric,social,map}.py`): filtro por
+  basename do manifest com **fail-early** — ID do manifest ausente na pasta ⇒
+  `FileNotFoundError`, nunca *silent drop* (manifesto errado ou pré-processamento
+  incompleto corromperia silenciosamente o eixo-x da curva). `map` repassa o
+  `allowlist` a `Social` por herança.
+- **Trains** (`train_{vectorized,social,map,lane_topo,multimodal,sequential}.py`):
+  `allowlist=TRAIN_ALLOWLIST` **só no `train_dataset`**; val intocada.
+- **Orquestração**: `run_pipeline.sh` propaga `-e TRAIN_ALLOWLIST` ao container
+  (bloqueador real); `run_grid_gpu.py` grava proveniência (`allowlist : <manifest>`)
+  no `run.txt`.
+
+Edições diff-minimal (irmãos diferem só pelo thread-through do allowlist);
+`py_compile` + smoke em cada arquivo.
+
+**Cache cumulativo + manifestos.** `manifest_6`=2972 ⊂ `manifest_12`=5934 ⊂
+`manifest_24`=11767 (~490 cen/shard). Integridade: `comm -23` aninhado = 0; md5 dos
+basenames idêntico entre os 3 caches.
+
+**Veredito 6→12→24 (N=8, agent/raw, `_15`).**
+- Todos os 6 métodos melhoram em minADE/minFDE/MissRate a cada dobra; **nenhum satura
+  → data-limited a 24**.
+- **Inversão `+lane_topo > +map` sobrevive e alarga** (confirmada nos 3 pontos): a 24,
+  `+lane_topo` lidera as 4 métricas (minADE 1.783 < 1.867, minFDE 4.002 < 4.245,
+  MissRate 0.548 < 0.578, mAP 0.113 > 0.096) e é o único com mAP monótono e sd apertado
+  (0.067→0.094→0.113).
+- **Joelho começando só em ADE/FDE** (ganho por dobra encolhe); **MissRate ainda em
+  passo estável** (~−0.03/dobra, não flexionou). mAP ruidoso exceto `+lane_topo`.
+
+**Acurácia a 24 shards (ordenado por MissRate_15):**
+
+| método | minADE | minFDE | MissRate | mAP |
+|---|---|---|---|---|
+| +lane_topo | 1.783 | 4.002 | 0.548 | 0.113 |
+| +map | 1.867 | 4.245 | 0.578 | 0.096 |
+| sequential | 2.254 | 5.701 | 0.676 | 0.078 |
+| +social | 2.145 | 5.171 | 0.691 | 0.069 |
+| VectorNet | 2.315 | 5.806 | 0.692 | 0.076 |
+| multimodal | 2.279 | 5.766 | 0.693 | 0.083 |
+
+**Custo.** `multimodal` é o mais barato (~2.1 Wh/seed a 24); `+map`/`+lane_topo` custam
+~10–17× mais energia. `best_epoch` cai a 24 (converge em menos épocas com mais dado);
+`time_to_best` sobe (mais batches/época); VRAM ~1.1–1.8 GB (não é gargalo).
+
+**Caveat de medição — `-l 1` → `-lms 500`.** `run_grid_gpu.py` passou a amostrar
+`nvidia-smi` a cada 500 ms. A coluna `util_gpu_train` do ponto-24 **NÃO é comparável**
+à de 6/12 (confounder duplo: mais dado *e* nova taxa de amostragem no mesmo ponto).
+Amostragem mais fina não resgatou métrica: GPU segue ociosa 83–96 % (starvation de I/O,
+§0.14). Alavanca real = I/O + SM-activity (DCGM), não taxa de polling. Teste limpo
+pendente: 1 seed fixo a `-l 1` vs `-lms 500` (uma variável).
+
+**Segue aberto (não-infra):**
+- Manifesto de **validation** (`VAL_ALLOWLIST` fail-early, default = manifesto canônico
+  das 879) — **única peça p/ infra a 100 %** e pré-requisito do **Eixo B** (convergência
+  da val; checkpoints travados, varia tamanho da val).
+- **I/O**: Teste A (`num_workers`/prefetch, grátis) → Teste B (SATA vs NVMe por
+  subset-via-manifest) → decisão de SSD (provável Gen4 4 TB; trava = IOPS-4K/latência).
+- Critério de **seleção de métodos** (comparativo controlado) e baseline
+  **constant-velocity** (pré-req de métricas absolutas).
+
+---
+
 ## 1. Objetivo da pesquisa
 
 Projeto de mestrado em datasets automotivos / autonomous driving. Foco inicial:

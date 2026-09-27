@@ -52,6 +52,11 @@ CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/chec
 LOG_ROOT = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
 
 
+# Optional training-set allowlist (data-scaling curve). None -> whole cache.
+# Only the TRAIN dataset is filtered; validation is the fixed ruler.
+TRAIN_ALLOWLIST = os.environ.get("TRAIN_ALLOWLIST")
+
+
 def masked_mse_per_mode(outputs, targets, mask):
     """
     Masked mean squared error of EACH mode, per example in the batch.
@@ -168,7 +173,8 @@ def train(cls_weight, agent_centric, seed=None):
 
     try:
         train_dataset = WaymoMotionDatasetAgentCentric(
-            TRAIN_CACHE, agent_centric=agent_centric, features=FEATURES)
+            TRAIN_CACHE, agent_centric=agent_centric, features=FEATURES,
+            allowlist=TRAIN_ALLOWLIST)
         val_dataset = WaymoMotionDatasetAgentCentric(
             VAL_CACHE, agent_centric=agent_centric, features=FEATURES)
     except Exception as e:

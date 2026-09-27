@@ -50,6 +50,7 @@ CHECKPOINT_ROOT = os.environ.get("CHECKPOINT_ROOT", "/workspace/experiments/chec
 # Root of the per-epoch training logs (one CSV per run, named by
 # model + cls_weight + arm + seed + timestamp so runs never overwrite).
 LOG_ROOT = os.environ.get("LOG_ROOT", "/workspace/experiments/logs")
+TRAIN_ALLOWLIST = os.environ.get("TRAIN_ALLOWLIST")  # None -> whole folder (data-scaling allowlist)
 
 # V0-std: stats de feature congeladas (mean/std por-canal do cache_train),
 # geradas UMA vez por compute_feature_stats.py. Carregadas para os buffers do
@@ -180,7 +181,7 @@ def train(cls_weight, agent_centric, seed=None, standardize=False,
 
     try:
         train_dataset = WaymoMotionDatasetAgentCentric(
-            TRAIN_CACHE, agent_centric=agent_centric, features=FEATURES)
+            TRAIN_CACHE, agent_centric=agent_centric, features=FEATURES, allowlist=TRAIN_ALLOWLIST)
         val_dataset = WaymoMotionDatasetAgentCentric(
             VAL_CACHE, agent_centric=agent_centric, features=FEATURES)
     except Exception as e:
