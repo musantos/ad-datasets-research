@@ -29,24 +29,19 @@ experimental controlada** que isola **uma variável arquitetural por etapa**
 lane (V3)`), permitindo atribuir cada ganho a um componente específico — ao
 contrário de comparações que misturam dados, treino e arquitetura de uma vez.
 Cada degrau é avaliado contra as métricas oficiais da Waymo e, como eixo
-secundário, contra o custo computacional (tempo, potência de GPU). **Estado:**
-infraestrutura oficial ~90% pronta; V0/V1 fechados e validados com múltiplas
-seeds; V2 e V3 construídos e smoke-testados (seed0), com as grades de 8 seeds
-pendentes para fechar o veredito de cada degrau. Registro técnico completo
+secundário, contra o custo computacional (tempo, potência de GPU). **Estado:** Motion **concluído e congelado** — infraestrutura de treino fechada; V0–V3 com veredito **N=8** (mega-run de 8 seeds). V2 (mapa) **confirmado** (fecha o MissRate longo); V3 (topologia de lane) **não confirmado** — o ganho de seed0 não sobreviveu a N=8 (negativo limpo). Estudo de **data-scaling 6→12→24** concluído: regime **data-limited** (nenhum método satura), com a inversão `+lane_topo > +map` sobrevivendo e alargando. Pendências não-bloqueantes: manifesto de validation e baseline constant-velocity. Registro técnico completo
 (setup, bugs corrigidos, resultados por seed, limitações) em
 [`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md). *(Um
 relatório destilado `docs/waymo_motion.md` está planejado, caso a etapa
 renda um paper próprio de Motion.)*
 
-🔜 **Próxima fase:** migração de foco para Perception, com expansão para
-outros datasets (ZOD, A2D2) visando benchmarking e comparação
-cross-dataset.
+🔜 **Fase atual:** foco migrado para **Perception** (Motion congelado, aquecimento concluído). Estudo comparativo cross-dataset em Waymo/ZOD em definição; A2D2 a confirmar.
 
 ## Datasets
 
 | Dataset | Papel no projeto | Status |
 |---|---|---|
-| Waymo Open Dataset (Motion) | Aquecimento / hands-on | Baseline validado com métricas oficiais |
+| Waymo Open Dataset (Motion) | Aquecimento / hands-on | Concluído/congelado — data-scaling 6→12→24 (N=8) |
 | Waymo Open Dataset (Perception) | Foco principal | Planejado |
 | ZOD (Zenseact Open Dataset) | Benchmarking cross-dataset | Planejado |
 | A2D2 (Audi Autonomous Driving Dataset) | Benchmarking cross-dataset | Planejado |
@@ -104,8 +99,7 @@ validação, limitações conhecidas) em
 
 ## Próximos passos
 
-- Concluir/documentar a etapa de Motion (possível paper específico sobre
-  esse baseline).
+- Motion concluído/congelado (possível paper específico sobre esse baseline — a decidir).
 - Migrar foco de pesquisa para **Perception** no Waymo Open Dataset.
 - Expandir para ZOD e A2D2, com pipeline de benchmarking e comparação
   cross-dataset como objetivo central da dissertação.
