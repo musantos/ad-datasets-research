@@ -20,3 +20,4 @@ experiments/checkpoints/
 .env
 *.log
 .ipynb_checkpoints/
+src/waymo-open-dataset/
