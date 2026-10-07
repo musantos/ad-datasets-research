@@ -32,7 +32,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Subset
+
+# evaluate() retains every val target across the split; with the default
+# file_descriptor sharing strategy each worker-origin tensor holds an open FD,
+# exhausting `ulimit -n` on non-trivial val sets. file_system backs shared
+# tensors by name instead -- the fix the RuntimeError itself recommends.
+mp.set_sharing_strategy("file_system")
 
 from perception.waymo.tools.dataset import PerceptionCacheDataset, collate_fn
 from perception.models.faster_rcnn import build_faster_rcnn
@@ -240,6 +247,10 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--run-id", default=None)
     p.add_argument("--runs-root", type=Path, default=Path("runs"))
+    p.add_argument("--sweep-csv", type=Path, default=None,
+                   help="If set, append one summary row (run_id,seed,best_ap,"
+                        "best_epoch,epochs,early_stopped) here. One line per run "
+                        "-- the seed-sweep ledger; header written if absent.")
     p.add_argument("--save-epochs", default=None,
                    help="Comma-separated epoch numbers to snapshot, e.g. "
                         "'5,10,15,20' (1-based). Saves epoch_<e>.pt alongside "
@@ -293,8 +304,11 @@ def main():
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, collate_fn=collate_fn)
+    # num_workers=0 on val: evaluate() holds the whole split in memory, so
+    # worker shared-memory tensors spike RAM (and swap) each eval. Single-process
+    # removes the spike; val is small and GPU-bound, so throughput is unaffected.
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False,
-                            num_workers=args.num_workers, collate_fn=collate_fn)
+                            num_workers=0, collate_fn=collate_fn)
 
     # --- model / optim ------------------------------------------------------
     build = MODELS[args.model]
@@ -418,6 +432,22 @@ def main():
         tail = " | early-stopped" if stopped_early else ""
         print(f"[summary] best AP={best_ap:.4f} @ epoch {best_epoch} "
               f"(best.pt){tail}")
+
+    # --- sweep ledger: one row per run, appended to a shared CSV -----------
+    # Keeps all seeds' best AP in one place so ranking is a sort, not a grep
+    # across N logs. Checkpoints are never pruned -- the full distribution is
+    # the citable result (mean/std over seeds), not the single best.
+    if args.sweep_csv is not None:
+        ap_str = f"{best_ap:.4f}" if best_epoch > 0 else "nan"
+        row = (f"{run_id},{args.seed},{ap_str},{best_epoch},"
+               f"{args.epochs},{int(stopped_early)}")
+        args.sweep_csv.parent.mkdir(parents=True, exist_ok=True)
+        new_file = not args.sweep_csv.exists()
+        with args.sweep_csv.open("a") as f:
+            if new_file:
+                f.write("run_id,seed,best_ap,best_epoch,epochs,early_stopped\n")
+            f.write(row + "\n")
+        print(f"[sweep] appended row to {args.sweep_csv}")
 
 
 if __name__ == "__main__":
