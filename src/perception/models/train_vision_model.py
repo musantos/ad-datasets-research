@@ -42,7 +42,10 @@ from torch.utils.data import DataLoader, Subset
 mp.set_sharing_strategy("file_system")
 
 from perception.waymo.tools.dataset import PerceptionCacheDataset, collate_fn
-from perception.models.faster_rcnn import build_faster_rcnn
+from perception.models.faster_rcnn import (
+    build_faster_rcnn,
+    build_faster_rcnn_pretrained,
+)
 from perception.tools.det2d.eval_ap import evaluate_predictions
 
 
@@ -52,7 +55,14 @@ from perception.tools.det2d.eval_ap import evaluate_predictions
 # ---------------------------------------------------------------------------
 MODELS = {
     "faster_rcnn": build_faster_rcnn,
+    "faster_rcnn_pt": build_faster_rcnn_pretrained,
 }
+
+# Models carrying a pretrained backbone. The from-scratch LR default (2.5e-3
+# sgd) destroys their features, so --lr must be given explicitly (guarded in
+# main()). Their trainable_backbone_layers is fixed by the builder default (3),
+# applied automatically since main() calls the builder without that argument.
+PRETRAINED_MODELS = {"faster_rcnn_pt"}
 
 CLASS_NAMES = {1: "Vehicle", 2: "Pedestrian", 3: "Cyclist"}
 
@@ -279,6 +289,12 @@ def main():
     set_seed(args.seed)
 
     if args.lr is None:
+        if args.model in PRETRAINED_MODELS:
+            raise SystemExit(
+                f"--lr is required for pretrained model {args.model!r}: the "
+                f"from-scratch default (2.5e-3 sgd / 1e-4 adamw) would wreck "
+                f"the pretrained backbone. Tune one run, then lock it for the "
+                f"seed sweep.")
         args.lr = 2.5e-3 if args.optimizer == "sgd" else 1e-4
 
     if args.device == "cuda" and not torch.cuda.is_available():

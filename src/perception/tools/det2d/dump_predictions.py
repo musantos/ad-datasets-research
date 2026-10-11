@@ -27,10 +27,16 @@ from PIL import Image
 
 # --- adjust these two imports to your package layout -----------------------
 from perception.waymo.tools.dataset import PerceptionCacheDataset
-from perception.models.faster_rcnn import build_faster_rcnn
+from perception.models.faster_rcnn import (
+    build_faster_rcnn,
+    build_faster_rcnn_pretrained,
+)
 # ---------------------------------------------------------------------------
 
-MODELS = {"faster_rcnn": build_faster_rcnn}
+MODELS = {
+    "faster_rcnn": build_faster_rcnn,
+    "faster_rcnn_pt": build_faster_rcnn_pretrained,
+}
 CLASS_NAMES = {1: "Vehicle", 2: "Pedestrian", 3: "Cyclist"}
 
 
