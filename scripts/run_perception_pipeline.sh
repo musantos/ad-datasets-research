@@ -40,6 +40,7 @@ set -u  # NOT -e: one failed seed/step must not abort the whole ladder.
 : "${DO_INFER:=1}"                        # predictions.json per seed (PR/confusion)
 : "${DO_PLOTS:=1}"                        # curves + PR + confusion per step, + scaling
 : "${DO_VIDEO:=1}"                        # median-seed A-vs-B comparison video per step
+: "${VAL_LIMIT:=}"                        # cap val frames for infer/dump (smoke only); empty = FULL val
 
 # ---- video parameters ------------------------------------------------------
 : "${DUMP_SCORE_THRESH:=0.05}"            # dump keeps >= this; video filters higher
@@ -55,18 +56,29 @@ set -u  # NOT -e: one failed seed/step must not abort the whole ladder.
 : "${NTFY_TOPIC:=}"
 : "${NTFY_URL:=https://ntfy.sh}"
 
-# ---- rough ETA calibration (measured n48: ~124-146 s/ep over 587 it) -------
+# ---- ETA calibration -------------------------------------------------------
+# The a-priori estimate models ALL stages, not just training (the smoke taught us
+# infer/dump/video dominate when training is tiny). At runtime it SELF-CORRECTS:
+# after each step the remaining estimate is scaled by observed/predicted so far.
+# training: measured n48 ~124-146 s/ep over 587 it -> ~0.23 s/it.
 : "${S_PER_IT:=0.23}"
 : "${OVERHEAD:=1.1}"
+# non-training stages, seconds per val frame (rough; self-correction fixes drift):
+: "${INFER_SPF:=0.35}"   # inference pass, per seed per arm
+: "${DUMP_SPF:=0.80}"    # dump PNGs for the 2 median seeds (video input)
+: "${ENCODE_SPF:=0.05}"  # video encode
+: "${PLOT_FIXED:=60}"    # curves+PR+confusion per step (~fixed)
 
 # ---- smoke overrides -------------------------------------------------------
 : "${SMOKE:=0}"
 if [ "$SMOKE" = 1 ]; then
   STEPS=6; SEEDS=1; EPOCHS=3; SAVE_EPOCHS="2,3"
-  echo "[pipe] SMOKE mode: step 6, 1 seed, 3 epochs, both arms + infer + plots + video."
+  : "${VAL_LIMIT:=16}"   # cap val too, so infer/dump/video stay fast in the smoke
+  echo "[pipe] SMOKE mode: step 6, 1 seed, 3 epochs, val=$VAL_LIMIT frames, full chain."
 fi
 
 read -r -a ARMS <<< "$ARMS_SPEC"
+VAL_ARG=""; [ -n "$VAL_LIMIT" ] && VAL_ARG="--limit $VAL_LIMIT"
 
 # ---- fixed infrastructure --------------------------------------------------
 CONTAINER=gpu_env
@@ -94,6 +106,19 @@ ntfy() {  # title, message, [priority]
 }
 
 fmt_hms() { awk -v s="$1" 'BEGIN{printf "%dh %02dm", int(s/3600), int((s%3600)/60)}'; }
+
+# Number of val frames actually processed by infer/dump (respects VAL_LIMIT).
+val_frames() {
+  local full
+  full=$(docker exec -i "$CONTAINER" python3 -I -c '
+import json, sys
+try: print(len(json.load(open(sys.argv[1]))))
+except Exception: print(0)
+' "$CACHE/val/manifest.json")
+  [ -z "$full" ] && full=0
+  if [ -n "$VAL_LIMIT" ] && [ "$full" -gt 0 ] && [ "$VAL_LIMIT" -lt "$full" ]; then
+    echo "$VAL_LIMIT"; else echo "$full"; fi
+}
 
 # --limit-train for step N from the LIVE manifest, or "SKIP:<available>".
 limit_for_step() {
@@ -135,11 +160,20 @@ else:
 ' "$1" "$2"
 }
 
-est_step_secs() {  # limit_train -> est seconds for ALL arms, all seeds
+est_step_secs() {  # limit_train -> est seconds for the WHOLE step (all stages)
   local nseeds narms
   nseeds=$(set -- $SEEDS; echo $#); narms=${#ARMS[@]}
-  awk -v l="$1" -v e="$EPOCHS" -v n="$nseeds" -v a="$narms" -v s="$S_PER_IT" -v o="$OVERHEAD" \
-    'BEGIN{ printf "%d", int(l/2)*e*n*a*s*o }'
+  awk -v l="$1" -v e="$EPOCHS" -v n="$nseeds" -v a="$narms" \
+      -v sit="$S_PER_IT" -v o="$OVERHEAD" -v nv="${NVAL:-0}" \
+      -v di="$DO_INFER" -v dp="$DO_PLOTS" -v dv="$DO_VIDEO" \
+      -v ispf="$INFER_SPF" -v dspf="$DUMP_SPF" -v espf="$ENCODE_SPF" -v pf="$PLOT_FIXED" \
+    'BEGIN{
+       train = int(l/2)*e*n*a*sit*o;
+       infer = (di=="1" ? n*a*nv*ispf : 0);
+       plots = (dp=="1" ? pf : 0);
+       video = (dv=="1" ? (2*nv*dspf + nv*espf) : 0);
+       printf "%d", train+infer+plots+video;
+     }'
 }
 
 # ---- core: one step, one arm (the folded sweep) ----------------------------
@@ -180,7 +214,7 @@ infer_point() {  # model point
     echo "  [infer] $RID"
     docker exec -i "$CONTAINER" env PYTHONPATH=$SRC python "$INFER" \
       --ckpt "runs/$RID/best.pt" --cache-root "$CACHE" --split val \
-      --score-thresh "$SCORE_THRESH" --quiet \
+      --score-thresh "$SCORE_THRESH" --quiet $VAL_ARG \
       || { echo "  [infer] $RID FAILED -- continuing"; ntfy "FAIL infer $RID" "$POINT" default; }
   done
 }
@@ -222,7 +256,7 @@ video_step() {  # point
     dex "[ -f runs/$RID/best.pt ]" || { echo "  [video] no best.pt $RID -- skip"; return 0; }
     docker exec -i "$CONTAINER" env PYTHONPATH=$SRC python "$DUMP" \
       --ckpt "runs/$RID/best.pt" --cache-root "$CACHE" --split val \
-      --dump-score-thresh "$DUMP_SCORE_THRESH" --out-dir "runs/$RID/dump_val" \
+      --dump-score-thresh "$DUMP_SCORE_THRESH" $VAL_ARG --out-dir "runs/$RID/dump_val" \
       || { echo "  [video] dump $RID FAILED -- skip"; return 0; }
   done
   OUT=$VIDEO_DIR/$POINT; dex "mkdir -p $OUT"
@@ -251,8 +285,11 @@ echo "[pipe] ladder steps=[$STEPS] arms=${#ARMS[@]} seeds=$NSEEDS epochs=$EPOCHS
 echo "[pipe] infer=$DO_INFER plots=$DO_PLOTS video=$DO_VIDEO plots_dir=$PLOTS_DIR videos_dir=$VIDEO_DIR ntfy=${NTFY_TOPIC:-<off>}"
 dex "mkdir -p $PLOTS_DIR $VIDEO_DIR runs"
 
-declare -A LIMIT_OF
-TOTAL_SECS=0; PLAN=""
+NVAL=$(val_frames)
+echo "[pipe] val frames used by infer/dump = $NVAL"
+
+declare -A LIMIT_OF EST_OF
+TOTAL_PRED=0; PLAN=""
 for N in $STEPS; do
   L=$(limit_for_step "$N")
   if [ -z "$L" ]; then echo "[pipe] !! cannot read manifest for n$N -- aborting"; exit 1; fi
@@ -261,20 +298,20 @@ for N in $STEPS; do
             echo "[pipe] n$N: only $avail segments extracted -> SKIP"
             ntfy "ladder: n$N skipped" "only $avail segments extracted" ;;
     *)      LIMIT_OF[$N]=$L
-            secs=$(est_step_secs "$L"); TOTAL_SECS=$((TOTAL_SECS + secs))
+            secs=$(est_step_secs "$L"); EST_OF[$N]=$secs; TOTAL_PRED=$((TOTAL_PRED + secs))
             PLAN="$PLAN n$N(limit=$L,~$(fmt_hms "$secs"))" ;;
   esac
 done
 echo "[pipe] plan:$PLAN"
-echo "[pipe] rough ETA (${#ARMS[@]} arms, $NSEEDS seeds): $(fmt_hms "$TOTAL_SECS")"
+echo "[pipe] a-priori ETA (${#ARMS[@]} arms, $NSEEDS seeds, all stages): $(fmt_hms "$TOTAL_PRED")"
 ntfy "ladder START" "steps:$PLAN
-total ~$(fmt_hms "$TOTAL_SECS")" high
+total ~$(fmt_hms "$TOTAL_PRED") (self-corrects after step 1)" high
 
-START=$(date +%s); DONE_SECS=0
+START=$(date +%s); DONE_SECS=0; PRED_DONE=0
 for N in $STEPS; do
   [ -z "${LIMIT_OF[$N]:-}" ] && continue
   L=${LIMIT_OF[$N]}; POINT=n${N}_${STRIDE_TAG}
-  pt_est=$(est_step_secs "$L")
+  pt_est=${EST_OF[$N]}
   echo "======================================================================"
   echo "[pipe] STEP n$N (limit_train=$L, point=$POINT)  est ~$(fmt_hms "$pt_est")"
   ntfy "n$N START" "limit=$L, est ~$(fmt_hms "$pt_est")"
@@ -288,10 +325,13 @@ for N in $STEPS; do
   [ "$DO_PLOTS" = 1 ] && plot_step "$POINT"
   [ "$DO_VIDEO" = 1 ] && video_step "$POINT"
 
-  t1=$(date +%s); el=$((t1 - t0)); DONE_SECS=$((DONE_SECS + el))
-  rem=$((TOTAL_SECS - DONE_SECS)); [ "$rem" -lt 0 ] && rem=0
-  echo "[pipe] step n$N done in $(fmt_hms "$el"); remaining ~$(fmt_hms "$rem")"
-  ntfy "n$N DONE" "took $(fmt_hms "$el"); remaining ~$(fmt_hms "$rem")"
+  t1=$(date +%s); el=$((t1 - t0)); DONE_SECS=$((DONE_SECS + el)); PRED_DONE=$((PRED_DONE + pt_est))
+  # self-calibrate: scale the remaining a-priori estimate by observed/predicted.
+  rem=$(awk -v tp="$TOTAL_PRED" -v pd="$PRED_DONE" -v ds="$DONE_SECS" \
+    'BEGIN{ k=(pd>0? ds/pd : 1); r=(tp-pd)*k; if(r<0)r=0; printf "%d", r }')
+  kf=$(awk -v pd="$PRED_DONE" -v ds="$DONE_SECS" 'BEGIN{printf "%.2f", (pd>0? ds/pd : 1)}')
+  echo "[pipe] step n$N done in $(fmt_hms "$el"); remaining ~$(fmt_hms "$rem") (calib x$kf)"
+  ntfy "n$N DONE" "took $(fmt_hms "$el"); remaining ~$(fmt_hms "$rem") (x$kf)"
 done
 
 # ---- scaling plot (guarded) ------------------------------------------------

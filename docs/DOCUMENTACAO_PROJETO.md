@@ -1,11 +1,16 @@
-# Projeto de Mestrado — Motion Prediction (Waymo Open Dataset)
+# Projeto de Mestrado — Waymo Open Dataset (Motion → Perception)
 ### Documento de contexto
-Última atualização: 28 de agosto de 2026
+Última atualização: 12 de outubro de 2026
 
 > **Nota de leitura.** As seções **1–11** abaixo são o registro **histórico do
 > Milestone 1** (16/jul/2026: baseline MLP *unimodal*, `random_split`, 3 shards).
 > O estado corrente do projeto está na **seção 0**, logo abaixo. Onde houver
 > conflito (ex.: split, formato de saída, scripts em uso), **vale a seção 0**.
+>
+> **Fases:** §0.1–§0.15 são a etapa de **Motion Prediction** (aquecimento,
+> **concluída e congelada**). A fase **atual — Perception** (foco principal da
+> tese) começa na **§0.16**. Onde Motion e Perception divergirem (containers,
+> scripts, protocolo), para o trabalho corrente **vale a §0.16**.
 
 ---
 
@@ -793,6 +798,137 @@ pendente: 1 seed fixo a `-l 1` vs `-lms 500` (uma variável).
   subset-via-manifest) → decisão de SSD (provável Gen4 4 TB; trava = IOPS-4K/latência).
 - Critério de **seleção de métodos** (comparativo controlado) e baseline
   **constant-velocity** (pré-req de métricas absolutas).
+
+---
+
+### 0.16. Perception — estudo A×B 2D + escada de data-scaling *(12/out/2026)* — abre a fase de Perception
+
+> **Início da fase principal da tese.** Motion (§0.1–§0.15) está **congelado**
+> (framework e infraestrutura validados). O foco migra para **Perception**:
+> detecção 2D em câmera frontal única no **Waymo Perception**, montada como um
+> **comparativo A×B controlado** com distribuição sobre seeds (nunca
+> best-vs-best). Este degrau fecha (a) o veredito A×B no ponto n48, (b) a infra
+> de medição (plots + vídeo), e (c) o pipeline da **escada de data-scaling**
+> `run_perception_pipeline.sh`, smoke-testado ponta-a-ponta em 12/out.
+
+**Tarefa e braços.** Faster R-CNN (torchvision), 3 classes (Vehicle/Pedestrian/
+Cyclist), câmera frontal (`f`). Dois braços, mesma régua (split/classes/
+`score-thresh`), LR travado por braço:
+- **pretrained** (`faster_rcnn_pt`, backbone pré-treinado + **FrozenBN**) — exige
+  `--lr 1e-3` (o default from-scratch destruiria as features).
+- **from-scratch** (`faster_rcnn`, **GroupNorm**) — LR default do trainer.
+
+**Confound a declarar SEMPRE (rodapé de toda figura):** pt usa FrozenBN, scratch
+usa GroupNorm (não há peso GN pré-treinado). A comparação é
+**pt+FrozenBN × scratch+GN** — prior e normalização acoplados. É honestidade
+metodológica, não defeito; entra na escrita.
+
+**Veredito A×B no ponto n48/s8 (10 seeds, dev-val 284 frames):**
+
+| | pretrained (FrozenBN) | from-scratch (GN) |
+|---|---|---|
+| mean ± std | **0.1545 ± 0.0041** | 0.0815 ± 0.0048 |
+| range | [0.1485, 0.1602] | [0.0749, 0.0905] |
+
+diff = **+0.073 AP (+90%, 1.90×)**; Welch t = 36.6, **p ≈ 5e-18**; distribuições
+**DISJUNTAS** (pior pt 0.1485 > melhor scratch 0.0905). O transfer vence de forma
+inequívoca neste ponto.
+
+**Épocas — E=32 por decisão medida, não chute.** As curvas val-AP dos 10 seeds a
+E=25 **saturam por volta da ép ~15–16** e depois só oscilam no ruído (ganho
+ép15→24 < desvio entre seeds). O `best_epoch` colado em 24/25 **não é
+truncamento** — é o argmax de uma cauda plana e ruidosa. Logo E=25 **não trunca**;
+E=32 foi escolhido só para dar folga clara do joelho e habilitar o **eixo de
+épocas** (a AP de toda época já está no `train_log.jsonl`, de graça). `best.pt`
+rastreia o pico → rodar longo é **seguro**; a única defesa de overfit é o
+`best.pt` (`PATIENCE=0`, sem early-stop, para **paridade** de épocas no ladder).
+
+**Escada de data-scaling (AP × N segmentos).**
+- Eixo-x = nº de segmentos **N ∈ {6, 12, 24, 48, 96}**, **aninhado** (primeiros-N
+  do split congelado). Verificado empiricamente: o manifesto de **96** é
+  superconjunto estrito do de 48 — os **primeiros 1174 registros são idênticos
+  campo-a-campo** ao n48 (`segment`/`frame_idx`/`boxes`), núcleo preservado.
+- **Mecanismo de seleção = `--limit-train K`** (sem código novo em
+  `dataset.py`/trainer). Como há **0 registros vazios** e os segmentos são
+  **blocos contíguos** na ordem do manifesto, os primeiros K frames = os
+  primeiros N segmentos, exato. Mapa K: n6→**150**, n12→**298**, n24→**591**,
+  n48→**1174**, n96→**2340** (derivado em runtime do manifesto vivo, robusto a
+  re-extração).
+- **Val é a régua FIXA do ladder** (12 segmentos, 284 frames): `--limit-val`
+  **nunca** é passado; todos os pontos avaliam no mesmo val. Re-extrair o val
+  quebraria a comparabilidade.
+- Protocolo: **10 seeds**, **E=32**, `PATIENCE=0`, `--warmup-iters 500`,
+  `SAVE_EPOCHS=8,16,32` (snapshots weights-only por orçamento de época, p/
+  vídeo/PR). `best.pt` por seed = pico; checkpoints nunca podados — a
+  **distribuição** (mean±std sobre seeds) é o resultado citável.
+
+**Extração do 96 (feita).** `preprocessor.py` fatia `[:N]` de um split congelado
+(`perception_splits.json`), então o 96 só **acrescenta** 48 segmentos ao cache
+do 48 (re-decodifica os 48 antigos, bytes idênticos; não destrutivo). Comando:
+`--split train --n-segments 96 --stride 8 --cameras f`. **Stride é fixado na
+extração**, não no treino (o `STRIDE_TAG=s8` do pipeline é só rótulo dos runs).
+
+**Caveat de classe (carregado para a escrita):** **ciclista é escasso** nos
+pontos pequenos — 107 caixas no n48 (300 no n96), concentradas em poucos
+segmentos. A AP de ciclista é **ruído abaixo de n48** (não corrigível por escolha
+de seed); AP geral e curvas de veículo/pedestre escalam limpas. Vira nota de
+processo, não bloqueio.
+
+**Pipeline — `scripts/run_perception_pipeline.sh` (1 arquivo, auto).** Orquestrador
+host-side (faz `docker exec` no `gpu_env`); dobra o sweep de seeds como função
+interna (substitui o antigo `run_sweep_perception.sh`). Por step N:
+1. **treino** dos 2 braços (10 seeds, E=32, snapshots 8/16/32), val fixo;
+2. **inferência** pura por seed → `infer_val/predictions.json` (`inference_frcnn.py`,
+   enxuto, sem pixels — alimenta PR/confusão);
+3. **plots** por step → `plots/<point>/` (`plot_curves` + `plot_pr` + `plot_confusion`);
+4. **vídeo** por step → `videos/<point>/`: **seed mediano** de cada braço escolhido
+   **automaticamente** (o mais perto da média no ledger), `dump_predictions.py` +
+   `compare_video.py` (A×B, layout `3up`);
+5. **ntfy** host-side (fora do allowlist do container): START com plano+ETA,
+   START/DONE por step com "quanto falta", **ping em falha** de seed, COMPLETE.
+   Ao fim: `plot_scaling.py` (AP×N, mean±std por braço).
+- **Tudo é parâmetro** env-overridable (`STEPS/SEEDS/EPOCHS/PATIENCE/SAVE_EPOCHS/
+  ARMS_SPEC/PLOTS_DIR/VIDEO_DIR/NTFY_TOPIC/...`). Modo exploratório de 1 ponto:
+  `--point <model> [lr]` com `POINT`/`LIMIT_TRAIN`.
+- **SMOKE=1**: 1 seed, 3 épocas, step 6, **val capado em 16** → exercita a cadeia
+  inteira (treino→snapshot→inferência→plots→vídeo) em ~2–3 min. Vídeo **cheio** só
+  nas runs reais.
+- **ETA com auto-calibração:** a estimativa a-priori modela **todas as etapas**
+  (treino + inferência + plots + vídeo), calibrada para reproduzir o smoke
+  medido (~14 min com val cheio); em runtime, o "quanto falta" é **reescalado
+  pela razão real/previsto** após cada step. Ladder completo a-priori ~**105 h**
+  (n6 ~4h, n12 ~7h, n24 ~14h, n48 ~27h, n96 ~53h).
+
+**Infra de medição (`src/perception/tools/det2d/`):**
+- `inference_frcnn.py` — predictions.json enxuto (sem PNG) + AP COCO; para PR/
+  confusão/métrica. Saída default `<ckpt_dir>/infer_<split>/predictions.json`.
+- `dump_predictions.py` — predictions.json **com PNGs** (para o renderer de vídeo).
+- `compare_video.py` — vídeo A×B alinhado por `image_id`, seed **mediano** (não o
+  melhor); layouts `3up` (GT|A|B) e `dual-overlay`.
+- `plot_curves.py` (loss+AP×época, mean±std), `plot_pr.py` (PR por classe),
+  `plot_confusion.py` (4×4), **`plot_scaling.py` (NOVO — AP×N)**.
+- `eval_ap.py` — a régua única (COCO-AP), alimentada em memória pelo trainer e via
+  JSON pelos standalones.
+
+**Escopo — o que esta infra cobre.** Pronta só para **2D, câmera frontal única,
+Waymo Perception**. Cada um destes QUEBRA uma premissa (régua/dado novo, não
+extensão dos plots): **outras câmeras (5)**, **FAME (tracking cross-camera** →
+métrica MOTA/IDF1/HOTA, não AP), **3D** (IoU BEV/3D, outra eval). A máquina de
+comparação é **arm-agnostic**: "generalista × especialista" é só trocar os globs
+dos `--arm`, desde que os dois usem a mesma régua.
+
+**Estado em 12/out e pendências (não-bloqueantes):**
+- Pipeline **smoke-testado VERDE** ponta-a-ponta (treino→inferência→plots→vídeo→
+  scaling); `compare_video` gravou mp4 (imageio/cv2 presente no `gpu_env`). Ladder
+  completo **pronto para lançar** (~105 h); n48 já tem dados a E=25 (10 seeds) como
+  conferência histórica.
+- **`plot_scaling.py` deve ser copiado para o container** em
+  `src/perception/tools/det2d/` (o pipeline o chama lá dentro; guardado se ausente).
+- **`dump_predictions.py` linha ~78** usa `Image.fromarray(arr, mode="RGB")` —
+  depreciado, **quebra no Pillow 13** (~15/out/2026). Fix de 1 linha: remover
+  `mode="RGB"` (RGB é inferido de HxWx3). Não bloqueia hoje.
+- Próximo após o ladder: curva AP×N + tabela; PR/confusão/vídeo nos pontos
+  representativos; depois o eixo generalista×especialista.
 
 ---
 

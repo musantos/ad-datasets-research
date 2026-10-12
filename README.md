@@ -21,28 +21,34 @@ Prediction — a decidir conforme o projeto avança.
 
 ## Status atual
 
-🟢 **Pipeline de Motion funcional de ponta a ponta** no Waymo Open Motion
-Dataset — da leitura dos dados brutos à validação com as métricas oficiais
-do desafio (minADE, minFDE, Miss Rate, mAP). O estudo segue uma **escada
-experimental controlada** que isola **uma variável arquitetural por etapa**
-(`MLP → VectorNet (V0) → contexto social (V1) → mapa (V2) → topologia de
-lane (V3)`), permitindo atribuir cada ganho a um componente específico — ao
-contrário de comparações que misturam dados, treino e arquitetura de uma vez.
-Cada degrau é avaliado contra as métricas oficiais da Waymo e, como eixo
-secundário, contra o custo computacional (tempo, potência de GPU). **Estado:** Motion **concluído e congelado** — infraestrutura de treino fechada; V0–V3 com veredito **N=8** (mega-run de 8 seeds). V2 (mapa) **confirmado** (fecha o MissRate longo); V3 (topologia de lane) **não confirmado** — o ganho de seed0 não sobreviveu a N=8 (negativo limpo). Estudo de **data-scaling 6→12→24** concluído: regime **data-limited** (nenhum método satura), com a inversão `+lane_topo > +map` sobrevivendo e alargando. Pendências não-bloqueantes: manifesto de validation e baseline constant-velocity. Registro técnico completo
-(setup, bugs corrigidos, resultados por seed, limitações) em
-[`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md). *(Um
-relatório destilado `docs/waymo_motion.md` está planejado, caso a etapa
-renda um paper próprio de Motion.)*
+🟢 **Fase de Perception em andamento (foco principal).** Estudo comparativo
+**A×B controlado** em detecção 2D (câmera frontal única, Waymo Perception):
+**pretrained (FrozenBN) × from-scratch (GroupNorm)** com o mesmo detector
+Faster R-CNN, mesma régua (split/classes/score-thresh), distribuição sobre
+seeds (nunca best-vs-best). Veredito no ponto n48/s8 (10 seeds): o pretrained
+**vence de forma disjunta** (AP 0.1545 ± 0.0041 vs 0.0815 ± 0.0048; +0.073 AP,
++90%; p ≈ 5e-18). Em curso: **escada de data-scaling** AP×N sobre
+**6 → 12 → 24 → 48 → 96** segmentos (`scripts/run_perception_pipeline.sh`,
+10 seeds, E=32), com pipeline automático de treino → inferência → plots
+(curves/PR/confusão/scaling) → vídeo comparativo, validado ponta-a-ponta.
+Registro técnico completo em
+[`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md) **§0.16**.
 
-🔜 **Fase atual:** foco migrado para **Perception** (Motion congelado, aquecimento concluído). Estudo comparativo cross-dataset em Waymo/ZOD em definição; A2D2 a confirmar.
+🧊 **Motion concluído e congelado** (etapa de aquecimento). Escada experimental
+`MLP → VectorNet (V0) → social (V1) → mapa (V2) → topologia de lane (V3)`,
+veredito **N=8**: **V2 (mapa) confirmado** (fecha o MissRate longo), **V3
+(lane topo) não confirmado** (ganho de seed0 não sobreviveu a N=8). Data-scaling
+de Motion **6→12→24** concluído: regime **data-limited** (nenhum método satura),
+com a inversão `+lane_topo > +map` sobrevivendo e alargando. Registro em
+§0.1–§0.15. *(Relatório destilado `docs/waymo_motion.md` planejado, caso renda
+um paper próprio de Motion.)*
 
 ## Datasets
 
 | Dataset | Papel no projeto | Status |
 |---|---|---|
 | Waymo Open Dataset (Motion) | Aquecimento / hands-on | Concluído/congelado — data-scaling 6→12→24 (N=8) |
-| Waymo Open Dataset (Perception) | Foco principal | Planejado |
+| Waymo Open Dataset (Perception) | Foco principal | **Em andamento** — A×B transfer + data-scaling 6→96 |
 | ZOD (Zenseact Open Dataset) | Benchmarking cross-dataset | Planejado |
 | A2D2 (Audi Autonomous Driving Dataset) | Benchmarking cross-dataset | Planejado |
 
@@ -51,16 +57,22 @@ renda um paper próprio de Motion.)*
 ```
 .
 ├── docs/
-│   ├── DOCUMENTACAO_PROJETO.md  # registro técnico da etapa de Motion (setup, bugs, resultados por seed)
+│   ├── DOCUMENTACAO_PROJETO.md  # registro técnico (Motion §0.1–0.15, Perception §0.16)
 │   └── waymo_motion.md          # (planejado) relatório destilado de Motion
 ├── docker/
-│   ├── waymo-metrics/        # container CPU: leitura de dados + métricas oficiais (TF)
-│   └── training-v1/          # container GPU: treino de modelos (PyTorch)
+│   ├── waymo-metrics/        # container CPU (cpu_env): leitura de dados + métricas oficiais (TF)
+│   └── training-v1/          # container GPU (gpu_env): treino/inferência (PyTorch)
+├── scripts/
+│   └── run_perception_pipeline.sh  # orquestrador do ladder de Perception (train+infer+plots+vídeo)
 ├── src/
-│   ├── core/                 # decodificação e pré-processamento de dados (roda no container de métricas)
-│   ├── motion/                # modelos, treino, inferência e validação (Motion Prediction — aquecimento)
-│   └── perception/            # foco principal do mestrado (planejado)
-└── tutorial_motion_original.ipynb   # tutorial oficial do Waymo, usado como referência na etapa de Motion
+│   ├── core/                 # decodificação e pré-processamento (container de métricas)
+│   ├── motion/               # modelos, treino, inferência e validação (Motion — aquecimento)
+│   └── perception/           # FOCO PRINCIPAL
+│       ├── waymo/tools/      # preprocessor.py (extração PNG+manifest), dataset.py
+│       ├── models/           # train_vision_model.py, faster_rcnn.py
+│       └── tools/det2d/      # inference_frcnn, dump_predictions, compare_video,
+│                             #   plot_curves, plot_pr, plot_confusion, plot_scaling, eval_ap
+└── tutorial_motion_original.ipynb   # tutorial oficial do Waymo (referência da etapa de Motion)
 ```
 
 ## Ambiente
@@ -70,36 +82,49 @@ entre as versões antigas de TensorFlow/CUDA exigidas pelas bibliotecas
 oficiais de alguns datasets (ex: `waymo-open-dataset`) e hardware GPU
 moderno:
 
-- **Métricas (CPU):** leitura de dados brutos, pré-processamento,
-  cálculo de métricas oficiais. TensorFlow 2.11 (CPU-only).
-- **Treino (GPU):** treinamento e inferência dos modelos. PyTorch,
-  CUDA 13.0.
+- **Métricas / extração (CPU, `cpu_env`):** leitura de tfrecords brutos,
+  pré-processamento, cálculo de métricas oficiais. TensorFlow 2.11 (CPU-only).
+- **Treino / inferência (GPU, `gpu_env`):** treino e inferência dos modelos.
+  PyTorch, CUDA. Perception roda inteiro aqui (o detector não precisa de TF).
 
-Ver `docker/` para os Dockerfiles de cada ambiente. A mesma estrutura de
-dois ambientes deve se repetir (ajustada conforme necessário) para os
-próximos datasets.
+Ver `docker/` para os Dockerfiles. A mesma estrutura de dois ambientes se
+repete (ajustada conforme necessário) para os próximos datasets.
 
-## Como reproduzir (Waymo Motion — etapa de aquecimento)
+## Como reproduzir
 
+**Perception (fase atual) — ladder de data-scaling 2D:**
 ```bash
-# Container de Métricas (CPU)
-python3 -m src.core.waymo_preprocessor
+# 1. Extração do cache (cpu_env) — PNG + manifest.json, stride 8, câmera frontal.
+#    [:N] no split congelado => n96 é superconjunto aninhado de n48 (núcleo idêntico).
+docker exec -it cpu_env python /workspace/src/perception/waymo/tools/preprocessor.py \
+  --split train --n-segments 96 --stride 8 --cameras f
+docker exec -it cpu_env python /workspace/src/perception/waymo/tools/preprocessor.py \
+  --split val   --n-segments 12 --stride 8 --cameras f   # val FIXO (não re-extrair)
 
-# Container de Treino (GPU)
-python3 -m src.motion.train_motionv4
-python3 -m src.motion.run_inference
-
-# Container de Métricas (CPU)
-python3 -m src.motion.validate_motion_official
+# 2. Ladder completo (host; faz docker exec no gpu_env). Smoke primeiro:
+SMOKE=1 ./scripts/run_perception_pipeline.sh
+# Run real (10 seeds, E=32, steps 6/12/24/48/96, ~105 h):
+NTFY_TOPIC=<topico> nohup ./scripts/run_perception_pipeline.sh > ladder_$(date +%F_%H%M).log 2>&1 &
 ```
 
-Detalhes completos (formato de dados, bugs corrigidos, resultados de
-validação, limitações conhecidas) em
+**Motion (etapa de aquecimento, congelada):**
+```bash
+python3 scripts/run_grid_gpu.py      --model <m> --seeds 0-7            # GPU — gera run-id
+python3 scripts/run_grid_validate.py --model <m> --run-id <id> --seeds 0-7  # CPU/TF
+python3 scripts/consolidate_seeds.py --model <m> --run-id <id> --seeds 0-7  # GPU
+python3 scripts/consolidate_gpu.py                 --run-id <id>            # GPU
+python3 scripts/report.py                          --run-id <id>            # GPU
+```
+
+Detalhes completos (formato de dados, protocolo, vereditos, limitações) em
 [`docs/DOCUMENTACAO_PROJETO.md`](docs/DOCUMENTACAO_PROJETO.md).
 
 ## Próximos passos
 
-- Motion concluído/congelado (possível paper específico sobre esse baseline — a decidir).
-- Migrar foco de pesquisa para **Perception** no Waymo Open Dataset.
-- Expandir para ZOD e A2D2, com pipeline de benchmarking e comparação
-  cross-dataset como objetivo central da dissertação.
+- **Perception:** rodar o ladder completo 6→96 (10 seeds, E=32); curva AP×N +
+  tabela; análise PR/confusão/vídeo nos pontos representativos. Depois: eixo
+  "generalista × especialista" (mesma máquina de comparação, trocando os globs
+  dos arms, desde que os dois usem a mesma régua).
+- Expandir Perception para **ZOD** e **A2D2** (benchmarking cross-dataset — o
+  objetivo central da dissertação).
+- Motion: possível paper específico sobre o baseline (a decidir).
