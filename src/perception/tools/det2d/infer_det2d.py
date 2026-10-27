@@ -1,5 +1,11 @@
 """Run a trained detector over a split and report COCO AP -- scalable eval path.
 
+Model-agnostic: the detector is rebuilt from the ``model`` key saved in the
+checkpoint via the shared MODELS registry, so this one script scores every
+architecture in the study (faster_rcnn, retinanet, ssd -- scratch and
+pretrained). Renamed from ``inference_frcnn.py``: the old name predated the
+multi-architecture registry and was misleading -- it was never FRCNN-only.
+
 Unlike dump_predictions.py (which copies every frame to a PNG for the renderer),
 this writes NO pixels: it runs inference, feeds predictions + GT straight through
 the shared eval_ap ruler, and reports AP@[.50:.95] overall and per class. A lean
@@ -16,7 +22,7 @@ validation pack dropped at <cache-root>/<name> is usable without renaming.
 
 Run (PYTHONPATH=/workspace/src):
 
-    python .../inference_frcnn.py \
+    python .../infer_det2d.py \
         --ckpt runs/<run_id>/best.pt \
         --cache-root /workspace/datasets/waymo/perception_cache \
         --split val
@@ -35,12 +41,27 @@ from perception.models.faster_rcnn import (
     build_faster_rcnn,
     build_faster_rcnn_pretrained,
 )
+from perception.models.retinanet import (
+    build_retinanet,
+    build_retinanet_pretrained,
+)
+from perception.models.ssd import (
+    build_ssd,
+    build_ssd_pretrained,
+)
 from perception.tools.det2d.eval_ap import evaluate_predictions  # one ruler
 # ---------------------------------------------------------------------------
 
+# Must cover every model the trainer can produce, since load_model() rebuilds
+# the detector from the `model` key saved in the checkpoint. Keep in sync with
+# train_vision_model.MODELS, or a non-FRCNN checkpoint fails with KeyError here.
 MODELS = {
     "faster_rcnn": build_faster_rcnn,
     "faster_rcnn_pt": build_faster_rcnn_pretrained,
+    "retinanet": build_retinanet,
+    "retinanet_pt": build_retinanet_pretrained,
+    "ssd": build_ssd,
+    "ssd_pt": build_ssd_pretrained,
 }
 CLASS_NAMES = {1: "Vehicle", 2: "Pedestrian", 3: "Cyclist"}
 

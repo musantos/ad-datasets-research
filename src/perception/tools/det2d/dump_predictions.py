@@ -31,11 +31,25 @@ from perception.models.faster_rcnn import (
     build_faster_rcnn,
     build_faster_rcnn_pretrained,
 )
+from perception.models.retinanet import (
+    build_retinanet,
+    build_retinanet_pretrained,
+)
+from perception.models.ssd import (
+    build_ssd,
+    build_ssd_pretrained,
+)
 # ---------------------------------------------------------------------------
 
+# Must cover every model the trainer can produce (load_model rebuilds from the
+# checkpoint's `model` key). Keep in sync with train_vision_model.MODELS.
 MODELS = {
     "faster_rcnn": build_faster_rcnn,
     "faster_rcnn_pt": build_faster_rcnn_pretrained,
+    "retinanet": build_retinanet,
+    "retinanet_pt": build_retinanet_pretrained,
+    "ssd": build_ssd,
+    "ssd_pt": build_ssd_pretrained,
 }
 CLASS_NAMES = {1: "Vehicle", 2: "Pedestrian", 3: "Cyclist"}
 
@@ -75,7 +89,9 @@ def _list(v):
 def save_png(image, path):
     """[C,H,W] float in [0,1] -> PNG on disk. Returns (width, height)."""
     arr = (image.permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
-    img = Image.fromarray(arr, mode="RGB")
+    # Pillow 13 (Oct 2025) dropped the `mode=` arg from fromarray; the mode is
+    # inferred from the array shape/dtype (HxWx3 uint8 -> RGB), so pass none.
+    img = Image.fromarray(arr)
     img.save(path)
     return img.width, img.height
 
