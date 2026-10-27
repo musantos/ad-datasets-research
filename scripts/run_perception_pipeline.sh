@@ -113,9 +113,16 @@ DEV_ENV=""
 [ -n "$CUDA_DEV" ] && DEV_ENV="CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$CUDA_DEV"
 
 # ---- stage toggles ---------------------------------------------------------
+# PLOTTING IS DECOUPLED (2026-10-27). Comparison plots moved to the post-run
+# orchestrator plot_comparison.sh: a single pipeline invocation is pinned to one
+# GPU and one ARMS_SPEC, so it cannot see the other GPU's experiment and any
+# comparison it draws is accidental (this is what produced the broken cross
+# figure). The pipeline now produces DATA only (ledgers + train_log + infer);
+# choose and draw comparisons afterwards with plot_comparison.sh. DO_PLOTS /
+# DO_VIDEO default to 0 and are kept only as an opt-in escape hatch.
 : "${DO_INFER:=1}"                        # predictions.json per seed (PR/confusion)
-: "${DO_PLOTS:=1}"                        # curves + PR + confusion per step, + scaling
-: "${DO_VIDEO:=1}"                        # median-seed A-vs-B comparison video per step
+: "${DO_PLOTS:=0}"                        # legacy in-pipeline curves/PR/confusion (use plot_comparison.sh)
+: "${DO_VIDEO:=0}"                        # legacy in-pipeline comparison video (use plot_comparison.sh)
 : "${VAL_LIMIT:=}"                        # cap val frames for infer/dump (smoke only); empty = FULL val
 
 # ---- video parameters ------------------------------------------------------
@@ -654,21 +661,19 @@ train $(fmt_hms "$train_el") * tail $(fmt_hms "$tail_el")
 $next_line"
 done
 
-# ---- scaling plot (guarded) ------------------------------------------------
+# ---- scaling plot: REMOVED (decoupled) -------------------------------------
+# The final AP x N scaling plot used to run here. It assumed a SINGLE experiment
+# folder (--runs-root "$RUNS_ABS"), so it could never draw the cross-experiment /
+# cross-GPU comparison this campaign is actually about. Scaling (and every other
+# comparison figure) is now a post-run call, over whatever exp folders hold the
+# arms:
+#   ARMS="cross_g0:retinanet cross_g1:retinanet_pt cross_g1:ssd cross_g0:ssd_pt" \
+#   STEPS="$STEPS" TAG="$STRIDE_TAG" OUT=/workspace/runs/plots_cross \
+#     ./plot_comparison.sh
 echo "[pipe] ladder training complete in $(fmt_hms "$(( $(date +%s) - START ))")"
-if [ "$DO_PLOTS" = 1 ] && dex "[ -f $PLOT_SCALING ]"; then
-  SCALE_ARMS=()
-  for A in "${ARMS[@]}"; do IFS=: read -r L M _ <<< "$A"; SCALE_ARMS+=( --arm "$L=$M" ); done
-  echo "[pipe] AP x N scaling plot -> $PLOTS_DIR"
-  docker exec -i "$CONTAINER" python "$PLOT_SCALING" \
-    --runs-root "$RUNS_ABS" --steps "$STEPS" --tag "$STRIDE_TAG" \
-    --out-dir "$PLOTS_DIR" "${SCALE_ARMS[@]}" \
-    || echo "[pipe] plot_scaling FAILED -- ledgers in $RUNS_REL/sweep_*.csv"
-else
-  echo "[pipe] (plot_scaling.py not found or plots off -- data in $RUNS_REL/sweep_*_n<N>_${STRIDE_TAG}.csv)"
-fi
 
 ntfy "ladder COMPLETE [$EXP]" "$(now_stamp)
 total $(fmt_hms "$(( $(date +%s) - START ))")" high
-echo "[pipe] DONE. plots in $PLOTS_DIR/<point>/ ; videos in $VIDEO_DIR/<point>/ ; ledgers $RUNS_REL/sweep_*.csv"
+echo "[pipe] DONE (data only). ledgers: $RUNS_REL/sweep_*.csv ; predictions: $RUNS_REL/<run>/infer_val/"
+echo "[pipe] plot with: ARMS=\"$EXP:<model> ...\" STEPS=\"$STEPS\" TAG=$STRIDE_TAG OUT=$PLOTS_DIR ./plot_comparison.sh"
 [ "$HW_MONITOR" = 1 ] && echo "[pipe] telemetry: $TELEMETRY_CSV"

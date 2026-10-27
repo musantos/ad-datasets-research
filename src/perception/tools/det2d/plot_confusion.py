@@ -1,4 +1,4 @@
-"""Plot detection confusion matrices (per arm), pretrained vs from-scratch.
+"""Plot detection confusion matrices (per arm), one panel per model.
 
 Consumes the same predictions.json dumps as plot_pr.py; needs no pycocotools --
 IoU matching is done here. For each image, predictions are matched to GT greedily
@@ -6,31 +6,27 @@ by descending score, class-agnostically, at IoU >= --iou (so a box that localize
 an object but mislabels it shows up as off-diagonal confusion, not as a miss).
 
 The matrix is (K+1) x (K+1): the K classes plus a ``background`` row/column.
-  rows = ground-truth class (+ background),
-  cols = predicted class    (+ background).
-  M[g, p]  (g, p real classes): a true-g object detected and labelled p
-  M[g, bg]: a true-g object with no matching prediction -> false negative (miss)
-  M[bg, p]: a prediction of class p matching no GT -> false positive
-  M[bg, bg]: undefined -- the detection "true negative" is the unbounded image
-             background, so this cell is left blank (not zero).
+  rows = ground-truth class (+ background), cols = predicted class (+ background).
+
+Each panel is titled by the arm's model (via model_style), so the same model
+reads consistently across figures. Arms are ``exp_id:model_nN_tag`` (resolved to
+the per-seed predictions.json glob under --runs-base); legacy ``label=glob`` is
+still accepted.
 
 Unlike AP / PR (which sweep the score threshold), a confusion matrix is read at
 one operating point, so predictions are first filtered at --score-thresh. That
 threshold, like the comparison itself, must match across arms; it is stamped on
 the figure.
 
-Aggregation: each seed's matrix is row-normalized, then averaged across the
-arm's seeds (the distribution is the result). Cells show the mean; with more
-than one seed a small +/-std is annotated under it.
+Aggregation: each seed's matrix is row-normalized, then averaged across seeds.
+Cells show the mean; with more than one seed a small +/-std is annotated under.
 
-Confound, stated on the figure: pretrained uses FrozenBN, from-scratch uses
-GroupNorm -- prior and normalization are coupled, not isolated.
+The confound footer is configurable (--caption); default is neutral (the old
+FrozenBN-vs-GN note is false for a cross-architecture comparison).
 
-Run (pure numpy + matplotlib; no torch, no pycocotools -- runs in cpu_env too):
-
-    python plot_confusion.py \
-        --arm "pretrained=runs/faster_rcnn_pt_n48_s8_seed*/infer_val/predictions.json" \
-        --arm "from-scratch=runs/faster_rcnn_n48_s8_seed*/infer_val/predictions.json" \
+Run (pure numpy + matplotlib; no torch, no pycocotools):
+    python plot_confusion.py --runs-base /workspace/runs \
+        --arm cross_g0:retinanet_n96_s8 --arm cross_g1:ssd_n96_s8 \
         --iou 0.5 --score-thresh 0.5 --out-dir runs/plots
 """
 
@@ -46,6 +42,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 import numpy as np  # noqa: E402
 
+import model_style as ms  # noqa: E402
+
 DEFAULT_CLASS_NAMES = {"1": "Vehicle", "2": "Pedestrian", "3": "Cyclist"}
 
 PALETTE = {
@@ -58,14 +56,11 @@ PALETTE = {
 }
 
 DEFAULT_CAPTION = (
-    "dev-val (284 imgs). IoU-match >= {iou}, score >= {score}, row-normalized, "
-    "mean over {n} seeds. rows = true, cols = predicted. CONFOUND: pretrained = "
-    "FrozenBN, from-scratch = GroupNorm -- prior and norm are coupled."
-)
+    "IoU-match >= {iou}, score >= {score}, row-normalized, mean over {n} seeds. "
+    "rows = true, cols = predicted.")
 
 
 def iou_xyxy(a, b):
-    """IoU of two xyxy boxes."""
     ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
     ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
     iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
@@ -79,28 +74,21 @@ def iou_xyxy(a, b):
 
 
 def confusion_counts(frames, class_ids, iou_thr, score_thr):
-    """(K+1)x(K+1) raw count matrix for one predictions.json's frames.
-
-    rows = GT class (+ background last), cols = predicted class (+ background).
-    Greedy, class-agnostic matching by descending score.
-    """
     id2idx = {cid: i for i, cid in enumerate(class_ids)}
     bg = len(class_ids)
     M = np.zeros((bg + 1, bg + 1), dtype=float)
-
     for fr in frames:
         gt_boxes, gt_labels = fr["gt"]["boxes"], fr["gt"]["labels"]
         pred = fr["pred"]
         order = sorted(range(len(pred["scores"])),
                        key=lambda k: pred["scores"][k], reverse=True)
         gt_used = [False] * len(gt_boxes)
-
         for k in order:
             if pred["scores"][k] < score_thr:
                 continue
             pl = int(pred["labels"][k])
             if pl not in id2idx:
-                continue  # label outside declared classes -> ignore
+                continue
             pbox = pred["boxes"][k]
             best_iou, best_g = 0.0, -1
             for gi, gbox in enumerate(gt_boxes):
@@ -114,18 +102,16 @@ def confusion_counts(frames, class_ids, iou_thr, score_thr):
                 M[g, id2idx[pl]] += 1
                 gt_used[best_g] = True
             else:
-                M[bg, id2idx[pl]] += 1  # false positive
-
+                M[bg, id2idx[pl]] += 1
         for gi, used in enumerate(gt_used):
             if not used:
                 gl = int(gt_labels[gi])
                 if gl in id2idx:
-                    M[id2idx[gl], bg] += 1  # false negative (miss)
+                    M[id2idx[gl], bg] += 1
     return M
 
 
 def row_normalize(M):
-    """Row-normalize; zero-sum rows stay zero (no division)."""
     out = M.astype(float).copy()
     sums = out.sum(axis=1, keepdims=True)
     nz = sums.squeeze(-1) > 0
@@ -133,39 +119,30 @@ def row_normalize(M):
     return out
 
 
-def collect_arm(spec, class_ids, iou_thr, score_thr):
-    """'label=glob' -> (label, mean matrix, std matrix, n_seeds)."""
-    if "=" not in spec:
-        raise SystemExit(f"--arm must be 'label=glob', got: {spec!r}")
-    label, pattern = (s.strip() for s in spec.split("=", 1))
+def collect_arm(style, runs_base, class_ids, iou_thr, score_thr):
+    """Resolved arm -> (style, mean matrix, std matrix, n_seeds)."""
+    pattern = style.pred_glob(runs_base)
     paths = sorted(glob(pattern))
     if not paths:
-        raise SystemExit(f"[{label}] no predictions.json match: {pattern}")
-
+        raise SystemExit(f"[{style.label}] no predictions.json match: {pattern}")
     mats = []
     for p in paths:
         frames = json.loads(Path(p).read_text())["frames"]
         mats.append(row_normalize(confusion_counts(
             frames, class_ids, iou_thr, score_thr)))
-    stack = np.stack(mats)  # [n, K+1, K+1]
-    print(f"[arm] {label}: {len(paths)} seeds")
-    return (label, stack.mean(axis=0),
+    stack = np.stack(mats)
+    print(f"[arm] {style.label}: {len(paths)} seeds")
+    return (style, stack.mean(axis=0),
             stack.std(axis=0, ddof=1) if len(paths) > 1 else None, len(paths))
 
 
 def draw_matrix(ax, mean, std, labels, colors, cmap, *, title, first=True):
-    """Render one row-normalized confusion matrix as an annotated heatmap.
-
-    ``first`` controls the shared y axis: only the leftmost panel carries the
-    "true" label and the class y-ticks (identical across panels otherwise).
-    """
     n = len(labels)
     masked = np.ma.array(mean, mask=False)
-    masked.mask[n - 1, n - 1] = True  # background/background is undefined
+    masked.mask[n - 1, n - 1] = True
     cmap = cmap.copy()
     cmap.set_bad(colors["grid"])
     im = ax.imshow(masked, cmap=cmap, vmin=0, vmax=1, aspect="equal")
-
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
     ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=9,
@@ -184,7 +161,6 @@ def draw_matrix(ax, mean, std, labels, colors, cmap, *, title, first=True):
     ax.set_yticks(np.arange(-.5, n, 1), minor=True)
     ax.grid(which="minor", color=colors["surface"], linewidth=2)
     ax.tick_params(which="minor", length=0)
-
     for i in range(n):
         for j in range(n):
             if i == n - 1 and j == n - 1:
@@ -203,15 +179,15 @@ def draw_matrix(ax, mean, std, labels, colors, cmap, *, title, first=True):
 
 def main():
     p = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--arm", action="append", required=True, metavar="LABEL=GLOB",
-                   help="Arm as 'label=glob' over predictions.json (repeatable).")
-    p.add_argument("--iou", type=float, default=0.5,
-                   help="IoU threshold for matching pred to GT.")
-    p.add_argument("--score-thresh", type=float, default=0.5,
-                   help="Keep predictions above this (operating point). Must "
-                        "match across arms.")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--arm", action="append", dest="arms", required=True,
+                   metavar="EXP:MODEL_nN_tag",
+                   help="exp_id:model_nN_tag (or legacy label=glob); repeatable.")
+    p.add_argument("--arm-name", action="append", dest="arm_names", default=[])
+    p.add_argument("--arm-color", action="append", dest="arm_colors", default=[])
+    p.add_argument("--runs-base", default="/workspace/runs")
+    p.add_argument("--iou", type=float, default=0.5)
+    p.add_argument("--score-thresh", type=float, default=0.5)
     p.add_argument("--out-dir", type=Path, default=Path("runs/plots"))
     p.add_argument("--dark", action="store_true")
     p.add_argument("--dpi", type=int, default=150)
@@ -226,23 +202,18 @@ def main():
     cmap = LinearSegmentedColormap.from_list("seq", colors["seq"])
     plt.rcParams["font.family"] = ["DejaVu Sans"]
 
-    # Fail-fast on empty arms before any matching.
-    for spec in args.arm:
-        _, pattern = (s.strip() for s in spec.split("=", 1))
-        if not glob(pattern):
-            raise SystemExit(f"no predictions.json match: {pattern}")
-
-    arms = [collect_arm(spec, class_ids, args.iou, args.score_thresh)
-            for spec in args.arm]
+    styles = ms.resolve_arms(args.arms, args.arm_names, args.arm_colors)
+    arms = [collect_arm(s, args.runs_base, class_ids, args.iou, args.score_thresh)
+            for s in styles]
 
     fig, axes = plt.subplots(1, len(arms), figsize=(5.4 * len(arms), 5.0),
                              dpi=args.dpi, squeeze=False)
     axes = axes[0]
     fig.patch.set_facecolor(colors["surface"])
     im = None
-    for idx, (ax, (label, mean, std, n)) in enumerate(zip(axes, arms)):
+    for idx, (ax, (style, mean, std, n)) in enumerate(zip(axes, arms)):
         ax.set_facecolor(colors["surface"])
-        im = draw_matrix(ax, mean, std, labels, colors, cmap, title=label,
+        im = draw_matrix(ax, mean, std, labels, colors, cmap, title=style.label,
                          first=(idx == 0))
 
     cbar = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02)

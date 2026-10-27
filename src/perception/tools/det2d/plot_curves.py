@@ -1,34 +1,26 @@
 """Plot mean +/- std training curves (loss, AP/AP50/AP75) vs epoch across arms.
 
-Reads ``train_log.jsonl`` from every run in an arm's glob and aggregates across
-seeds -- the project invariant is "the distribution is the result, not the best
-seed", so each arm is drawn as a mean line with a +/-1 std band over its runs,
-never a single cherry-picked seed. Two (or more) arms are overlaid on the same
-axes so pretrained-vs-scratch is read directly.
+Reads ``train_log.jsonl`` from every run in an arm and aggregates across seeds --
+the project invariant is "the distribution is the result", so each arm is a mean
+line with a +/-1 std band over its runs, never a single cherry-picked seed. Two
+or more arms are overlaid so the comparison is read directly.
 
-No re-score and no checkpoint needed: loss_total, AP, AP50 and AP75 are logged
-per epoch by the trainer (eval-ap-every=1), so these curves come straight off
-disk. PR / confusion live in a separate script that consumes predictions.json.
+Identity (name/colour/marker/linestyle) comes from model_style, keyed off the
+MODEL, so the same model looks the same here as in the scaling / PR / confusion
+figures. Arms are given as ``exp_id:model_nN_tag`` (resolved to the per-seed run
+glob under --runs-base); the legacy ``label=glob`` form is still accepted.
 
-Arm membership is given by an explicit glob (``label=glob``); the ``model`` key
-in each run's args.json is read only to assert the arm is homogeneous and warn
-if a glob accidentally mixes faster_rcnn with faster_rcnn_pt.
+No re-score and no checkpoint needed: loss_total, AP, AP50, AP75 are logged per
+epoch by the trainer. PR / confusion live in a separate script.
 
-Confound, stated on every figure: pretrained uses FrozenBN, from-scratch uses
-GroupNorm (no pretrained GN weights exist). The comparison is pt+FrozenBN vs
-scratch+GN -- prior and normalization are coupled, not isolated.
+The confound footer is configurable (--caption). The old hard-coded
+FrozenBN-vs-GN note is true only for the same-model pretrained-vs-scratch ladder
+and false for a cross-architecture comparison; the default is neutral.
 
-Run (PYTHONPATH not required; pure pandas + matplotlib):
-
-    python plot_curves.py \
-        --runs-root runs \
-        --arm "pretrained=faster_rcnn_pt_n48_s8_seed*" \
-        --arm "from-scratch=faster_rcnn_n48_s8_seed*" \
+Run:
+    python plot_curves.py --runs-base /workspace/runs \
+        --arm cross_g0:retinanet_n96_s8 --arm cross_g1:retinanet_pt_n96_s8 \
         --out-dir runs/plots
-
-Add ``--show-seeds`` for faint per-seed lines behind each mean, ``--dark`` for
-dark-surface figures, ``--loss-components`` for the 4-panel RPN/head loss
-breakdown.
 """
 
 import argparse
@@ -39,26 +31,19 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")  # headless; write files, never a display
+matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
-# --- palette (data-viz reference instance; pt=slot1 blue, scratch=slot2 orange).
-# Fixed order: color follows the entity, assigned by arm order, never cycled.
+import model_style as ms  # noqa: E402
+
 PALETTE = {
-    "light": {
-        "surface": "#fcfcfb", "primary": "#0b0b0b", "secondary": "#52514e",
-        "muted": "#898781", "grid": "#e1e0d9", "axis": "#c3c2b7",
-        "series": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"],
-    },
-    "dark": {
-        "surface": "#1a1a19", "primary": "#f0efec", "secondary": "#c3c2b7",
-        "muted": "#898781", "grid": "#2c2c2a", "axis": "#383835",
-        "series": ["#3987e5", "#d95926", "#199e70", "#c98500"],
-    },
+    "light": {"surface": "#fcfcfb", "primary": "#0b0b0b", "secondary": "#52514e",
+              "muted": "#898781", "grid": "#e1e0d9", "axis": "#c3c2b7"},
+    "dark": {"surface": "#1a1a19", "primary": "#f0efec", "secondary": "#c3c2b7",
+             "muted": "#898781", "grid": "#2c2c2a", "axis": "#383835"},
 }
 
-# Metric -> (axis label, title). Driven by what the advisor asked for.
 METRIC_LABELS = {
     "loss_total": ("training loss (total)", "Training loss vs epoch"),
     "AP": ("AP@[.50:.95]", "AP@[.50:.95] vs epoch"),
@@ -68,21 +53,24 @@ METRIC_LABELS = {
     "loss_classifier": ("loss_classifier", "Classifier loss"),
     "loss_objectness": ("loss_objectness", "Objectness loss"),
     "loss_rpn_box_reg": ("loss_rpn_box_reg", "RPN box-reg loss"),
+    # one-stage (retinanet/ssd/fcos) loss keys, so their panels are labelled too
+    "bbox_regression": ("bbox_regression", "Box-regression loss"),
+    "classification": ("classification", "Classification loss"),
 }
 
-DEFAULT_CAPTION = (
-    "dev-val (284 imgs), mean +/- 1 std over seeds. CONFOUND: pretrained = "
-    "FrozenBN, from-scratch = GroupNorm -- prior and norm are coupled."
-)
+DEFAULT_CAPTION = "dev-val, mean +/- 1 std over seeds."
 
 
 class Arm:
-    """One comparison arm: a label, its loaded runs, and the model it holds."""
+    """One comparison arm: its resolved style + loaded runs."""
 
-    def __init__(self, label, runs, model):
-        self.label = label
-        self.runs = runs  # list of (run_id, DataFrame)
-        self.model = model
+    def __init__(self, style, runs):
+        self.style = style            # model_style.Arm
+        self.runs = runs              # list of (run_id, DataFrame)
+
+    @property
+    def label(self):
+        return self.style.label
 
     @property
     def n(self):
@@ -90,25 +78,18 @@ class Arm:
 
 
 def load_run(run_dir):
-    """Load one run's per-epoch log into a DataFrame (epoch made 1-based).
-
-    Returns (run_id, DataFrame, model_name). model_name comes from args.json
-    (authoritative, robust to folder renames) or None if absent.
-    """
+    """Load one run's per-epoch log into a DataFrame (epoch made 1-based)."""
     run_dir = Path(run_dir)
-    log_path = run_dir / "train_log.jsonl"
     rows = []
-    with log_path.open() as fh:
+    with (run_dir / "train_log.jsonl").open() as fh:
         for line in fh:
             line = line.strip()
             if line:
                 rows.append(json.loads(line))
     if not rows:
-        raise ValueError(f"empty log: {log_path}")
+        raise ValueError(f"empty log: {run_dir}")
     df = pd.DataFrame(rows)
-    # Log epoch is 0-based; plot against 1..N.
     df["epoch"] = (df["epoch"] + 1) if "epoch" in df else range(1, len(df) + 1)
-
     model = None
     args_path = run_dir / "args.json"
     if args_path.exists():
@@ -119,22 +100,9 @@ def load_run(run_dir):
     return run_dir.name, df, model
 
 
-def collect_arm(spec, runs_root):
-    """Expand one ``label=glob`` spec into an Arm, asserting homogeneity.
-
-    Globs are resolved relative to runs_root unless already absolute. A run dir
-    counts only if it holds a train_log.jsonl. If the matched runs carry more
-    than one distinct args.json model, a warning is printed -- the glob is too
-    loose (e.g. it swept in the quick probe or the other arm).
-    """
-    if "=" not in spec:
-        raise SystemExit(f"--arm must be 'label=glob', got: {spec!r}")
-    label, pattern = spec.split("=", 1)
-    label, pattern = label.strip(), pattern.strip()
-
-    base = Path(pattern)
-    pattern = str(base if base.is_absolute() else Path(runs_root) / base)
-
+def collect_arm(style, runs_base):
+    """Load all runs matching a resolved arm's run glob into an Arm."""
+    pattern = style.run_glob(runs_base)
     runs, models = [], set()
     for d in sorted(glob(pattern)):
         p = Path(d)
@@ -144,24 +112,17 @@ def collect_arm(spec, runs_root):
         runs.append((run_id, df))
         if model is not None:
             models.add(model)
-
     if not runs:
-        raise SystemExit(f"[{label}] no runs with train_log.jsonl match: {pattern}")
+        raise SystemExit(f"[{style.label}] no runs with train_log.jsonl match: {pattern}")
     if len(models) > 1:
-        print(f"[warn] arm '{label}' mixes models {sorted(models)} -- "
-              f"glob too loose? Each arm should be one model.", file=sys.stderr)
-
-    print(f"[arm] {label}: {len(runs)} runs, model={sorted(models) or 'unknown'}")
-    return Arm(label, runs, sorted(models)[0] if models else None)
+        print(f"[warn] arm '{style.label}' mixes models {sorted(models)} -- "
+              f"glob too loose?", file=sys.stderr)
+    print(f"[arm] {style.label}: {len(runs)} runs, model={sorted(models) or 'unknown'}")
+    return Arm(style, runs)
 
 
 def aggregate(arm, metric):
-    """Per-epoch mean / std / n over an arm's runs for one metric.
-
-    Sample std (ddof=1); epochs present in fewer than 2 runs get std = NaN
-    (band collapses there rather than lying). Runs missing the metric are
-    skipped for that metric only.
-    """
+    """Per-epoch mean / std / n over an arm's runs for one metric."""
     series = [df[["epoch", metric]] for _, df in arm.runs if metric in df]
     if not series:
         return None
@@ -184,9 +145,9 @@ def _style_axes(ax, colors, *, xlabel, ylabel, title):
 
 
 def draw_metric(ax, arms, metric, colors, *, show_seeds):
-    """Draw one metric for all arms onto ax: mean line + std band (+ seeds)."""
-    for i, arm in enumerate(arms):
-        color = colors["series"][i % len(colors["series"])]
+    """Draw one metric for all arms: mean line (model colour/linestyle) + band."""
+    for arm in arms:
+        color, ls, marker = arm.style.color, arm.style.linestyle, arm.style.marker
         agg = aggregate(arm, metric)
         if agg is None:
             print(f"[warn] metric '{metric}' absent for arm '{arm.label}'",
@@ -201,26 +162,23 @@ def draw_metric(ax, arms, metric, colors, *, show_seeds):
         hi = agg["mean"] + agg["std"]
         ax.fill_between(agg.index, lo, hi, color=color, alpha=0.16,
                         linewidth=0, zorder=2)
-        ax.plot(agg.index, agg["mean"], color=color, linewidth=2.0,
+        markevery = max(1, len(agg.index) // 6)  # sparse markers keep dense curves clean
+        ax.plot(agg.index, agg["mean"], color=color, linestyle=ls, linewidth=2.0,
+                marker=marker, markevery=markevery, markersize=5,
                 label=f"{arm.label} (n={arm.n})", zorder=3)
-    xlabel = "epoch"
     ylabel, _ = METRIC_LABELS.get(metric, (metric, metric))
-    return xlabel, ylabel
+    return "epoch", ylabel
 
 
 def figure_for_metric(arms, metric, colors, cfg):
-    """One standalone figure for a single metric. Returns the Figure."""
     fig, ax = plt.subplots(figsize=(7.2, 4.6), dpi=cfg["dpi"])
     fig.patch.set_facecolor(colors["surface"])
     ax.set_facecolor(colors["surface"])
-
-    xlabel, ylabel = draw_metric(ax, arms, metric, colors,
-                                 show_seeds=cfg["show_seeds"])
+    xlabel, ylabel = draw_metric(ax, arms, metric, colors, show_seeds=cfg["show_seeds"])
     _, title = METRIC_LABELS.get(metric, (metric, metric))
     _style_axes(ax, colors, xlabel=xlabel, ylabel=ylabel, title=title)
     if len(arms) >= 2 or metric != "loss_total":
         ax.legend(frameon=False, fontsize=9, labelcolor=colors["primary"])
-
     fig.text(0.01, 0.01, cfg["caption"], fontsize=7, color=colors["muted"],
              ha="left", va="bottom", wrap=True)
     fig.tight_layout(rect=(0, 0.045, 1, 1))
@@ -228,10 +186,8 @@ def figure_for_metric(arms, metric, colors, cfg):
 
 
 def figure_ap_panel(arms, colors, cfg):
-    """Combined AP | AP50 | AP75 row sharing the epoch axis."""
     metrics = ["AP", "AP50", "AP75"]
-    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.4), dpi=cfg["dpi"],
-                             sharex=True)
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.4), dpi=cfg["dpi"], sharex=True)
     fig.patch.set_facecolor(colors["surface"])
     for ax, metric in zip(axes, metrics):
         ax.set_facecolor(colors["surface"])
@@ -247,15 +203,12 @@ def figure_ap_panel(arms, colors, cfg):
 
 
 def figure_loss_components(arms, colors, cfg):
-    """2x2 panel of the four head/RPN loss terms, if present in the logs."""
-    comps = ["loss_classifier", "loss_box_reg",
-             "loss_objectness", "loss_rpn_box_reg"]
+    comps = ["loss_classifier", "loss_box_reg", "loss_objectness", "loss_rpn_box_reg"]
     present = [m for m in comps
                if any(m in df for arm in arms for _, df in arm.runs)]
     if not present:
         return None
-    fig, axes = plt.subplots(2, 2, figsize=(11, 7.4), dpi=cfg["dpi"],
-                             sharex=True)
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7.4), dpi=cfg["dpi"], sharex=True)
     fig.patch.set_facecolor(colors["surface"])
     for ax, metric in zip(axes.ravel(), comps):
         ax.set_facecolor(colors["surface"])
@@ -285,47 +238,46 @@ def save(fig, out_dir, stem, formats):
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--arm", action="append", required=True, metavar="LABEL=GLOB",
-                   help="Arm as 'label=glob' (repeatable). First arm = color "
-                        "slot 1, etc. Glob is relative to --runs-root.")
-    p.add_argument("--runs-root", default=".",
-                   help="Base dir that relative arm globs resolve against.")
+    p.add_argument("--arm", action="append", dest="arms", required=True,
+                   metavar="EXP:MODEL_nN_tag",
+                   help="exp_id:model_nN_tag (or legacy label=glob); repeatable.")
+    p.add_argument("--arm-name", action="append", dest="arm_names", default=[])
+    p.add_argument("--arm-color", action="append", dest="arm_colors", default=[])
+    p.add_argument("--arm-linestyle", action="append", dest="arm_linestyles", default=[])
+    p.add_argument("--runs-base", "--runs-root", dest="runs_base",
+                   default="/workspace/runs",
+                   help="Base dir that arm exp_ids / relative globs resolve "
+                        "against. --runs-root kept as an alias for the pipeline.")
     p.add_argument("--out-dir", type=Path, default=Path("runs/plots"))
-    p.add_argument("--metrics", default="loss_total,AP,AP50,AP75",
-                   help="Comma list of per-epoch metrics to plot individually.")
-    p.add_argument("--show-seeds", action="store_true",
-                   help="Draw faint per-seed lines behind each mean.")
-    p.add_argument("--loss-components", action="store_true",
-                   help="Also emit the 2x2 head/RPN loss breakdown panel.")
-    p.add_argument("--no-ap-panel", action="store_true",
-                   help="Skip the combined AP|AP50|AP75 row.")
-    p.add_argument("--dark", action="store_true", help="Dark-surface figures.")
+    p.add_argument("--metrics", default="loss_total,AP,AP50,AP75")
+    p.add_argument("--show-seeds", action="store_true")
+    p.add_argument("--loss-components", action="store_true")
+    p.add_argument("--no-ap-panel", action="store_true")
+    p.add_argument("--dark", action="store_true")
     p.add_argument("--dpi", type=int, default=150)
-    p.add_argument("--formats", default="png,svg",
-                   help="Comma list of output formats (png,svg,pdf).")
-    p.add_argument("--caption", default=DEFAULT_CAPTION,
-                   help="Footnote stamped on every figure (confound note).")
+    p.add_argument("--formats", default="png,svg")
+    p.add_argument("--caption", default=DEFAULT_CAPTION)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     colors = PALETTE["dark" if args.dark else "light"]
-    plt.rcParams["font.family"] = ["DejaVu Sans"]  # consistent, always present
+    plt.rcParams["font.family"] = ["DejaVu Sans"]
 
-    arms = [collect_arm(spec, args.runs_root) for spec in args.arm]
+    styles = ms.resolve_arms(args.arms, args.arm_names, args.arm_colors,
+                             args.arm_linestyles)
+    arms = [collect_arm(s, args.runs_base) for s in styles]
     metrics = [m.strip() for m in args.metrics.split(",") if m.strip()]
     formats = [f.strip() for f in args.formats.split(",") if f.strip()]
-    cfg = {"dpi": args.dpi, "show_seeds": args.show_seeds,
-           "caption": args.caption}
+    cfg = {"dpi": args.dpi, "show_seeds": args.show_seeds, "caption": args.caption}
 
     for metric in metrics:
-        fig = figure_for_metric(arms, metric, colors, cfg)
-        save(fig, args.out_dir, f"curve_{metric}", formats)
+        save(figure_for_metric(arms, metric, colors, cfg), args.out_dir,
+             f"curve_{metric}", formats)
 
     if not args.no_ap_panel and {"AP", "AP50", "AP75"}.issubset(metrics):
-        save(figure_ap_panel(arms, colors, cfg), args.out_dir,
-             "panel_ap", formats)
+        save(figure_ap_panel(arms, colors, cfg), args.out_dir, "panel_ap", formats)
 
     if args.loss_components:
         fig = figure_loss_components(arms, colors, cfg)
