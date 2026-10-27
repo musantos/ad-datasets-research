@@ -39,6 +39,10 @@ from perception.models.ssd import (
     build_ssd,
     build_ssd_pretrained,
 )
+from perception.models.fcos import (
+    build_fcos,
+    build_fcos_pretrained,
+)
 # ---------------------------------------------------------------------------
 
 # Must cover every model the trainer can produce (load_model rebuilds from the
@@ -50,6 +54,8 @@ MODELS = {
     "retinanet_pt": build_retinanet_pretrained,
     "ssd": build_ssd,
     "ssd_pt": build_ssd_pretrained,
+    "fcos": build_fcos,
+    "fcos_pt": build_fcos_pretrained,
 }
 CLASS_NAMES = {1: "Vehicle", 2: "Pedestrian", 3: "Cyclist"}
 

@@ -49,6 +49,10 @@ from perception.models.ssd import (
     build_ssd,
     build_ssd_pretrained,
 )
+from perception.models.fcos import (
+    build_fcos,
+    build_fcos_pretrained,
+)
 from perception.tools.det2d.eval_ap import evaluate_predictions
 
 
@@ -63,11 +67,13 @@ MODELS = {
     "retinanet_pt": build_retinanet_pretrained,
     "ssd": build_ssd,
     "ssd_pt": build_ssd_pretrained,
+    "fcos": build_fcos,
+    "fcos_pt": build_fcos_pretrained,
 }
 
 # Models carrying a pretrained backbone. Retained for reference/documentation;
 # LR safety is now handled by the per-model default below, not by a guard.
-PRETRAINED_MODELS = {"faster_rcnn_pt", "retinanet_pt", "ssd_pt"}
+PRETRAINED_MODELS = {"faster_rcnn_pt", "retinanet_pt", "ssd_pt", "fcos_pt"}
 
 # Per-model default base LR, scaled to the locked bs=2 ladder protocol. Each
 # entry is the architecture's published recipe LR (at the reference batch 16)
@@ -75,6 +81,7 @@ PRETRAINED_MODELS = {"faster_rcnn_pt", "retinanet_pt", "ssd_pt"}
 # Goyal et al. 2017, "Accurate, Large Minibatch SGD"):
 #   Faster R-CNN  0.02  (Detectron/torchvision ref)   / 8 -> 2.5e-3
 #   RetinaNet     0.01  (Lin et al. 2017, Focal Loss)  / 8 -> 1.25e-3
+#   FCOS          0.01  (Tian et al. 2019, FCOS)       / 8 -> 1.25e-3
 #   SSD300-VGG16  1e-3  (Liu et al. 2016)              / 8 -> 1.25e-4
 # Pretrained and from-scratch share the per-arch value: He et al. 2018
 # ("Rethinking ImageNet Pre-training") trains from scratch at the SAME LR,
@@ -87,6 +94,8 @@ MODEL_DEFAULT_LR = {
     "faster_rcnn_pt": 2.5e-3,
     "retinanet": 1.25e-3,
     "retinanet_pt": 1.25e-3,
+    "fcos": 1.25e-3,
+    "fcos_pt": 1.25e-3,
     "ssd": 1.25e-4,
     "ssd_pt": 1.25e-4,
 }
